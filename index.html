@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Reading Tracker</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d0c0a; }
+    input[type=range] { -webkit-appearance:none; appearance:none; height:6px; border-radius:3px; background:#2a2318; outline:none; }
+    input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:16px; height:16px; border-radius:50%; cursor:pointer; }
+    input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { opacity:0.4; }
+    select option { background:#1a1810; color:#f0e4cc; }
+    ::-webkit-scrollbar { width:6px; height:6px; }
+    ::-webkit-scrollbar-track { background:#0d0c0a; }
+    ::-webkit-scrollbar-thumb { background:#3a3020; border-radius:3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyAi7s7UGua9ICnzkRI2jL_sAEaMMyrsWuU",
+      authDomain: "reading-schedule-e21dd.firebaseapp.com",
+      projectId: "reading-schedule-e21dd",
+      storageBucket: "reading-schedule-e21dd.firebasestorage.app",
+      messagingSenderId: "1063759778997",
+      appId: "1:1063759778997:web:5851c37e74d020abd59afc"
+    };
+    firebase.initializeApp(firebaseConfig);
+    window.db   = firebase.firestore();
+    window.auth = firebase.auth();
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+  const { useState, useCallback, useEffect, useRef } = React;
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+const START_DATE   = new Date(); START_DATE.setHours(0,0,0,0); // starts from today
+const STORAGE_KEY  = "readingSchedule_public_v1";
+
+// Default category palette — user can add more
+const DEFAULT_CATEGORY_COLORS = [
+  "#b85c38","#9a7a30","#3a8a78","#6a5aaa","#aa4a70","#4a8aaa","#8a7a50","#5a9a5a"
+];
+
+const INIT_CATEGORIES = {
+  cat1: { label:"Fiction",    icon:"📖", color:"#b85c38" },
+  cat2: { label:"Nonfiction", icon:"🌐", color:"#3a8a78" },
+};
+
+const INIT_BOOKS = {};
+
+const INIT_ORDER = { cat1:[], cat2:[] };
+
+const INIT_MINS = { cat1:20, cat2:20 };
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function wordsPerPage(book) { return (book.wordCount && book.pages) ? book.wordCount/book.pages : 250; }
+function calcPagesLeft(book) { return Math.max(0, book.pages - (book.pagesRead||0)); }
+function pctLeft(book) { return book.pages===0 ? 0 : Math.round((calcPagesLeft(book)/book.pages)*100); }
+function calcDaysForBook(book, mpd) {
+  const mins = calcPagesLeft(book) * wordsPerPage(book) / book.wpm;
+  return Math.max(1, Math.round(mins / mpd));
+}
+function addDays(date,n){ const d=new Date(date); d.setDate(d.getDate()+n); return d; }
+function fmtDate(d){ return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+function fmtShort(d){ return d.toLocaleDateString("en-US",{month:"short",day:"numeric"}); }
+function fmtDateStr(s){ if(!s)return""; const d=new Date(s+"T12:00:00"); return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); }
+function todayStr(){ return new Date().toISOString().split("T")[0]; }
+function genKey(){ return "k"+Math.random().toString(36).slice(2,9); }
+
+function buildTimeline(order, books, mpd) {
+  let cursor = new Date(START_DATE);
+  return (order||[]).map(key=>{
+    const b=books[key]; if(!b) return null;
+    const days=calcDaysForBook(b,mpd);
+    const start=new Date(cursor), end=addDays(cursor,days-1);
+    cursor=addDays(cursor,days);
+    return {key,days,startDate:start,endDate:end};
+  }).filter(Boolean);
+}
+
+// ─── STORAGE ──────────────────────────────────────────────────────────────────
+function lsKey(uid){ return STORAGE_KEY+(uid?`_${uid}`:"_guest"); }
+function loadLocal(uid){ try{ const r=localStorage.getItem(lsKey(uid)); return r?JSON.parse(r):null; }catch{return null;} }
+function saveLocal(uid,state){ try{ localStorage.setItem(lsKey(uid),JSON.stringify(state)); }catch{} }
+function cloudDoc(uid){ return window.db.collection("users").doc(uid).collection("data").doc("schedule"); }
+async function loadCloud(uid){ try{ const s=await cloudDoc(uid).get(); return s.exists?s.data():null; }catch(e){ console.warn("cloud load failed",e); return null; } }
+function saveCloud(uid,state){ const clean=JSON.parse(JSON.stringify(state)); cloudDoc(uid).set(clean).catch(e=>console.warn("cloud save",e)); }
+
+function blankState(cats){
+  const order={};
+  Object.keys(cats||INIT_CATEGORIES).forEach(k=>{ order[k]=[]; });
+  const mins={};
+  Object.keys(cats||INIT_CATEGORIES).forEach(k=>{ mins[k]=20; });
+  return { books:{}, order, minsPerDay:mins, log:[], categories:cats||INIT_CATEGORIES };
+}
+
+// ─── SMALL UI ─────────────────────────────────────────────────────────────────
+const labelStyle={ display:"block",fontSize:"10px",color:"#6a5a38",letterSpacing:"1px",fontFamily:"sans-serif",textTransform:"uppercase",marginBottom:"4px" };
+const textInputStyle={ background:"#1a1810",border:"1px solid #3a3020",color:"#f0e4cc",borderRadius:"5px",padding:"5px 7px",fontSize:"13px",fontFamily:"sans-serif",width:"100%",boxSizing:"border-box" };
+
+function Pill({children,color}){
+  return <span style={{fontSize:"10px",background:color+"22",color,border:`1px solid ${color}55`,padding:"2px 7px",borderRadius:"10px",fontFamily:"sans-serif",letterSpacing:"0.5px",whiteSpace:"nowrap",flexShrink:0}}>{children}</span>;
+}
+function NumInput({value,onChange,onBlur,min,max,width="70px",...rest}){
+  return <input type="number" value={value} min={min} max={max} onChange={onChange} onBlur={onBlur}
+    onKeyDown={e=>e.key==="Enter"&&e.target.blur()}
+    style={{background:"#1a1810",border:"1px solid #3a3020",color:"#f0e4cc",borderRadius:"5px",padding:"5px 7px",width,fontSize:"13px",fontFamily:"sans-serif",...(rest.style||{})}}
+    {...rest}/>;
+}
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen({onLogin}){
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const signIn=()=>{
+    setBusy(true); setErr("");
+    const provider=new firebase.auth.GoogleAuthProvider();
+    window.auth.signInWithPopup(provider).catch(e=>{ setErr(e.message); setBusy(false); });
+  };
+  return (
+    <div style={{minHeight:"100vh",background:"#0d0c0a",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}}>
+      <div style={{maxWidth:"360px",width:"100%",textAlign:"center"}}>
+        <div style={{fontSize:"48px",marginBottom:"16px"}}>📚</div>
+        <h1 style={{fontSize:"28px",fontWeight:"normal",color:"#f0e4cc",fontFamily:"Georgia,serif",marginBottom:"8px"}}>Reading Schedule</h1>
+        <p style={{color:"#6a5a40",fontSize:"13px",fontStyle:"italic",marginBottom:"32px"}}>Sign in to access your personal reading list</p>
+        <button onClick={signIn} disabled={busy} style={{
+          background:busy?"#2a2418":"#1a1810",border:"1px solid #4a3a20",color:busy?"#5a5038":"#c9a84c",
+          borderRadius:"10px",padding:"14px 28px",cursor:busy?"not-allowed":"pointer",
+          fontSize:"14px",fontFamily:"sans-serif",display:"inline-flex",alignItems:"center",gap:"10px",
+          transition:"all 0.2s",
+        }}>
+          <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.18z"/><path fill="#34A853" d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2a4.8 4.8 0 0 1-7.18-2.54H1.83v2.07A8 8 0 0 0 8.98 17z"/><path fill="#FBBC05" d="M4.5 10.52a4.8 4.8 0 0 1 0-3.04V5.41H1.83a8 8 0 0 0 0 7.18l2.67-2.07z"/><path fill="#EA4335" d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 1.83 5.4L4.5 7.49a4.77 4.77 0 0 1 4.48-3.3z"/></svg>
+          {busy?"Signing in…":"Sign in with Google"}
+        </button>
+        {err && <p style={{color:"#aa6a5a",fontSize:"12px",marginTop:"12px",fontFamily:"sans-serif"}}>{err}</p>}
+        <p style={{color:"#3a3028",fontSize:"11px",marginTop:"24px",fontFamily:"sans-serif"}}>Sign in with Google to get your own private reading list — no account setup needed</p>
+      </div>
+    </div>
+  );
+}
+
+// ─── CATEGORY MANAGER ─────────────────────────────────────────────────────────
+function CategoryManager({categories, onUpdate, onClose}){
+  const [cats,setCats]=useState(JSON.parse(JSON.stringify(categories)));
+  const [newLabel,setNewLabel]=useState("");
+  const [newIcon,setNewIcon]=useState("📚");
+  const [newColor,setNewColor]=useState(DEFAULT_CATEGORY_COLORS[Object.keys(cats).length % DEFAULT_CATEGORY_COLORS.length]);
+
+  const addCat=()=>{
+    if(!newLabel.trim()) return;
+    const key="cat_"+genKey();
+    setCats(p=>({...p,[key]:{label:newLabel.trim(),icon:newIcon,color:newColor}}));
+    setNewLabel(""); setNewIcon("📚");
+  };
+  const delCat=(key)=>{ if(Object.keys(cats).length<=1){alert("Need at least one category.");return;} const n={...cats}; delete n[key]; setCats(n); };
+  const updateCat=(key,field,val)=>setCats(p=>({...p,[key]:{...p[key],[field]:val}}));
+  const save=()=>{ onUpdate(cats); onClose(); };
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.7)",zIndex:1000,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}}>
+      <div style={{background:"#141208",border:"1px solid #3a3020",borderRadius:"14px",padding:"24px",width:"100%",maxWidth:"500px",maxHeight:"80vh",overflow:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}}>
+          <div style={{fontSize:"16px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>Manage Categories</div>
+          <button onClick={onClose} style={{background:"transparent",border:"none",color:"#5a5038",cursor:"pointer",fontSize:"20px"}}>✕</button>
+        </div>
+
+        {/* Existing categories */}
+        {Object.entries(cats).map(([key,cat])=>(
+          <div key={key} style={{display:"flex",gap:"8px",alignItems:"center",marginBottom:"8px",padding:"10px",background:"#1a1810",border:`1px solid ${cat.color}40`,borderLeft:`3px solid ${cat.color}`,borderRadius:"7px"}}>
+            <input value={cat.icon} onChange={e=>updateCat(key,"icon",e.target.value)} style={{...textInputStyle,width:"48px",textAlign:"center",fontSize:"18px",padding:"4px"}}/>
+            <input value={cat.label} onChange={e=>updateCat(key,"label",e.target.value)} style={{...textInputStyle,flex:1}}/>
+            <input type="color" value={cat.color} onChange={e=>updateCat(key,"color",e.target.value)} style={{width:"36px",height:"32px",border:"1px solid #3a3020",borderRadius:"5px",background:"none",cursor:"pointer",padding:"2px"}}/>
+            <button onClick={()=>delCat(key)} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px"}}>✕</button>
+          </div>
+        ))}
+
+        {/* Add new */}
+        <div style={{marginTop:"16px",padding:"14px",background:"#111008",border:"1px solid #2a2318",borderRadius:"8px"}}>
+          <div style={{fontSize:"11px",color:"#6a5a38",letterSpacing:"1px",fontFamily:"sans-serif",textTransform:"uppercase",marginBottom:"10px"}}>Add New Category</div>
+          <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
+            <input value={newIcon} onChange={e=>setNewIcon(e.target.value)} placeholder="📚" style={{...textInputStyle,width:"48px",textAlign:"center",fontSize:"18px",padding:"4px"}}/>
+            <input value={newLabel} onChange={e=>setNewLabel(e.target.value)} placeholder="Category name" style={{...textInputStyle,flex:1,minWidth:"120px"}}/>
+            <input type="color" value={newColor} onChange={e=>setNewColor(e.target.value)} style={{width:"36px",height:"32px",border:"1px solid #3a3020",borderRadius:"5px",background:"none",cursor:"pointer",padding:"2px"}}/>
+            <button onClick={addCat} style={{background:"#2a4a3a",border:"1px solid #3a6a4a",color:"#7aaa8a",borderRadius:"6px",padding:"6px 14px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>+ Add</button>
+          </div>
+        </div>
+
+        <div style={{display:"flex",gap:"8px",marginTop:"16px",justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{background:"transparent",border:"1px solid #3a3020",color:"#6a5a38",borderRadius:"7px",padding:"8px 18px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif"}}>Cancel</button>
+          <button onClick={save} style={{background:"#c9a84c",color:"#0d0c0a",border:"none",borderRadius:"7px",padding:"8px 18px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",fontWeight:"600"}}>Save Categories</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BOOK ROW ─────────────────────────────────────────────────────────────────
+function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,isSelected,onSelect,isMoveTarget,onMoveHere,showEdit,onToggleEdit,idx,onDragStart,onDragEnter,onDragEnd,isDragging,isDragOver}){
+  const b=books[bookKey]; if(!b) return null;
+  const cat=categories[b.type]||{color:"#8a8070",label:b.type,icon:"📖"};
+  const col=cat.color;
+  const wpg=Math.round(wordsPerPage(b));
+  const pLeft=calcPagesLeft(b), pct=pctLeft(b);
+  const notes=b.notes||[];
+
+  const [lPages,  setLPages]  = useState(String(b.pages));
+  const [lWords,  setLWords]  = useState(String(b.wordCount||""));
+  const [lWpm,    setLWpm]    = useState(String(b.wpm));
+  const [lRead,   setLRead]   = useState(String(b.pagesRead||0));
+  const [lTitle,  setLTitle]  = useState(b.title);
+  const [lAuthor, setLAuthor] = useState(b.author);
+  const [lSeries, setLSeries] = useState(b.series||"");
+  const [editTab, setEditTab] = useState("details");
+  const [noteInput,setNoteInput]=useState("");
+
+  useEffect(()=>{ setLPages(String(b.pages)); },[b.pages]);
+  useEffect(()=>{ setLWords(String(b.wordCount||"")); },[b.wordCount]);
+  useEffect(()=>{ setLWpm(String(b.wpm)); },[b.wpm]);
+  useEffect(()=>{ setLRead(String(b.pagesRead||0)); },[b.pagesRead]);
+
+  const commit=(field,raw,min,max,parse=parseInt)=>{
+    const v=parse(raw); if(!isNaN(v)&&v>=min&&(max===undefined||v<=max)){onUpdate(bookKey,field,v);return true;} return false;
+  };
+
+  const handleAddNote=()=>{
+    const text=noteInput.trim(); if(!text)return;
+    onUpdate(bookKey,"notes",[...notes,{id:genKey(),text,page:b.pagesRead||0,date:new Date().toISOString()}]);
+    setNoteInput("");
+  };
+
+  const bg = isSelected ? col+"28" : isDragOver ? col+"20" : isMoveTarget ? col+"12" : "#111008";
+  const border = isSelected ? col+"cc" : isDragOver ? col+"90" : isMoveTarget ? col+"60" : col+"28";
+
+  return (
+    <div
+      draggable
+      onDragStart={e=>{ e.dataTransfer.effectAllowed="move"; onDragStart(bookKey); }}
+      onDragEnter={e=>{ e.preventDefault(); onDragEnter(bookKey); }}
+      onDragOver={e=>e.preventDefault()}
+      onDragEnd={onDragEnd}
+      style={{background:bg,border:`1px solid ${border}`,borderLeft:`3px solid ${isSelected?col:isDragOver?col:col+"88"}`,borderRadius:"8px",marginBottom:"6px",transition:"border-color 0.1s,background 0.1s",boxShadow:isSelected?`0 0 0 2px ${col}40`:isDragOver?`0 2px 8px ${col}30`:"none",opacity:isDragging?0.45:1,cursor:"grab"}}>
+      <div style={{display:"flex",alignItems:"center",padding:"10px 12px",gap:"8px"}}>
+        <button onClick={()=>isSelected?onMoveHere(bookKey):onSelect(bookKey)}
+          title={isSelected?"Move here":"Tap to reorder"}
+          style={{background:isSelected?col+"40":isMoveTarget?col+"18":"transparent",border:`1px solid ${isSelected?col+"80":"#2a2018"}`,color:isSelected?col:isMoveTarget?col+"99":"#3a3028",borderRadius:"5px",padding:"4px 6px",cursor:"grab",fontSize:"14px",flexShrink:0,lineHeight:1,transition:"all 0.15s"}}>
+          {isSelected?"↕":"⠿"}
+        </button>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
+            {idx===0&&<Pill color={col}>Next up</Pill>}
+            {pLeft<b.pages&&pLeft>0&&<Pill color="#c9a84c">In progress</Pill>}
+            {pLeft===0&&<Pill color="#5a8a5a">✓ Done</Pill>}
+            <span style={{fontSize:"14px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>{b.title}</span>
+            {b.series&&<span style={{fontSize:"11px",color:"#6a5a40",fontStyle:"italic"}}>{b.series}</span>}
+          </div>
+          <div style={{fontSize:"11px",color:"#6a5840",marginTop:"1px"}}>{b.author}</div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
+          {tl&&<div style={{textAlign:"right"}}>
+            <div style={{fontSize:"13px",color:col,fontFamily:"sans-serif",fontWeight:700}}>~{tl.days}d</div>
+            <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>{fmtShort(tl.startDate)}→{fmtShort(tl.endDate)}</div>
+          </div>}
+          <button onClick={()=>onToggleEdit(bookKey)} style={{background:showEdit?col+"30":"transparent",border:`1px solid ${showEdit?col:"#3a3020"}`,color:showEdit?col:"#5a5040",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>✎</button>
+          <button onClick={()=>onDelete(bookKey)} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}} title="Remove">✕</button>
+        </div>
+      </div>
+
+      {b.pages>0&&<div style={{height:"3px",background:"#1a1810",marginTop:"-2px"}}><div style={{height:"100%",width:`${100-pct}%`,background:col+"88",borderRadius:"0 0 0 8px",transition:"width 0.3s"}}/></div>}
+
+      {showEdit&&(
+        <div style={{borderTop:`1px solid ${col}28`,background:"#0a0908"}}>
+          <div style={{display:"flex",borderBottom:`1px solid ${col}20`}}>
+            {[["details","⚙ Details"],["notes",`📝 Notes${notes.length?` (${notes.length})`:""}`]].map(([id,label])=>(
+              <button key={id} onClick={()=>setEditTab(id)} style={{background:editTab===id?"#111008":"transparent",border:"none",borderBottom:editTab===id?`2px solid ${col}`:"2px solid transparent",color:editTab===id?col:"#5a5038",padding:"8px 16px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",marginBottom:"-1px"}}>{label}</button>
+            ))}
+          </div>
+
+          {editTab==="details"&&(
+            <div style={{padding:"14px",display:"flex",flexDirection:"column",gap:"12px"}}>
+              <div style={{display:"flex",gap:"10px",flexWrap:"wrap"}}>
+                <div style={{flex:2,minWidth:"140px"}}><label style={labelStyle}>Title</label><input value={lTitle} onChange={e=>setLTitle(e.target.value)} onBlur={()=>onUpdate(bookKey,"title",lTitle)} onKeyDown={e=>e.key==="Enter"&&e.target.blur()} style={textInputStyle}/></div>
+                <div style={{flex:1,minWidth:"100px"}}><label style={labelStyle}>Author</label><input value={lAuthor} onChange={e=>setLAuthor(e.target.value)} onBlur={()=>onUpdate(bookKey,"author",lAuthor)} onKeyDown={e=>e.key==="Enter"&&e.target.blur()} style={textInputStyle}/></div>
+                <div style={{flex:1,minWidth:"100px"}}><label style={labelStyle}>Series</label><input value={lSeries} onChange={e=>setLSeries(e.target.value)} onBlur={()=>onUpdate(bookKey,"series",lSeries||undefined)} onKeyDown={e=>e.key==="Enter"&&e.target.blur()} style={textInputStyle}/></div>
+              </div>
+              <div>
+                <label style={labelStyle}>Category</label>
+                <select value={b.type} onChange={e=>onUpdate(bookKey,"type",e.target.value)} style={{...textInputStyle,cursor:"pointer"}}>
+                  {Object.entries(categories).map(([k,c])=><option key={k} value={k}>{c.icon} {c.label}</option>)}
+                </select>
+              </div>
+              <div style={{display:"flex",gap:"12px",flexWrap:"wrap",alignItems:"flex-end"}}>
+                <div><label style={labelStyle}>Total Pages</label><NumInput value={lPages} min={1} max={9999} width="80px" onChange={e=>setLPages(e.target.value)} onBlur={()=>{if(!commit("pages",lPages,1,9999))setLPages(String(b.pages));}}/></div>
+                <div><label style={labelStyle}>Word Count</label><NumInput value={lWords} min={100} width="110px" onChange={e=>setLWords(e.target.value)} onBlur={()=>{if(!commit("wordCount",lWords,100))setLWords(String(b.wordCount||""));}}/></div>
+                <div style={{padding:"0 4px 6px",background:"#141208",border:"1px solid #2a2218",borderRadius:"6px",minWidth:"90px",textAlign:"center"}}>
+                  <div style={{fontSize:"9px",color:"#6a5a38",fontFamily:"sans-serif",marginBottom:"2px",paddingTop:"5px"}}>WORDS/PAGE</div>
+                  <div style={{fontSize:"18px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{wpg}</div>
+                </div>
+                <div><label style={labelStyle}>Speed (wpm)</label><NumInput value={lWpm} min={50} max={2000} width="80px" onChange={e=>setLWpm(e.target.value)} onBlur={()=>{if(!commit("wpm",lWpm,50,2000))setLWpm(String(b.wpm));}}/></div>
+              </div>
+              <div>
+                <label style={labelStyle}>Pages Read — <span style={{color:col}}>{lRead} of {b.pages}</span> ({100-pct}% done, {pLeft} left)</label>
+                <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+                  <input type="range" min={0} max={b.pages} value={parseInt(lRead)||0} onChange={e=>{const v=e.target.value;setLRead(v);onUpdate(bookKey,"pagesRead",parseInt(v));}} style={{flex:1,accentColor:col,cursor:"pointer"}}/>
+                  <NumInput value={lRead} min={0} max={b.pages} width="65px" onChange={e=>setLRead(e.target.value)} onBlur={()=>{if(!commit("pagesRead",lRead,0,b.pages))setLRead(String(b.pagesRead||0));}}/>
+                </div>
+              </div>
+              <div style={{fontSize:"11px",color:"#5a5038",fontFamily:"sans-serif",paddingTop:"4px",borderTop:"1px solid #1e1c14"}}>
+                Est. {Math.round(pLeft*wordsPerPage(b)/b.wpm)} min · {Math.round(pLeft*wordsPerPage(b)/b.wpm/60*10)/10}h remaining
+              </div>
+            </div>
+          )}
+
+          {editTab==="notes"&&(
+            <div style={{padding:"14px",display:"flex",flexDirection:"column",gap:"12px"}}>
+              <div>
+                <label style={labelStyle}>New Note {b.pagesRead>0&&<span style={{color:col,textTransform:"none",letterSpacing:0}}>· p.{b.pagesRead}</span>}</label>
+                <textarea value={noteInput} onChange={e=>setNoteInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))handleAddNote();}} placeholder="Thoughts, quotes, reactions… (Ctrl+Enter to save)" rows={3} style={{...textInputStyle,resize:"vertical",lineHeight:"1.6",fontFamily:"Georgia,serif"}}/>
+                <button onClick={handleAddNote} style={{marginTop:"6px",background:col,color:"#fff",border:"none",borderRadius:"6px",padding:"7px 16px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",fontWeight:"600"}}>+ Add Note</button>
+              </div>
+              {notes.length===0
+                ?<div style={{textAlign:"center",padding:"20px 0",color:"#4a4030",fontSize:"13px",fontFamily:"sans-serif",fontStyle:"italic"}}>No notes yet.</div>
+                :<div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
+                  {[...notes].reverse().map(note=>{
+                    const d=new Date(note.date);
+                    return <div key={note.id} style={{background:"#111008",border:`1px solid ${col}22`,borderLeft:`3px solid ${col}44`,borderRadius:"6px",padding:"10px 12px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:"6px"}}>
+                        <div style={{display:"flex",gap:"8px",flexWrap:"wrap"}}>
+                          {note.page>0&&<span style={{fontSize:"10px",background:col+"22",color:col,border:`1px solid ${col}44`,padding:"1px 6px",borderRadius:"8px",fontFamily:"sans-serif"}}>p.{note.page}</span>}
+                          <span style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif"}}>{fmtDate(d)} · {d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}</span>
+                        </div>
+                        <button onClick={()=>onUpdate(bookKey,"notes",notes.filter(n=>n.id!==note.id))} style={{background:"transparent",border:"none",color:"#4a3020",cursor:"pointer",fontSize:"13px"}}>✕</button>
+                      </div>
+                      <p style={{margin:0,fontSize:"13px",color:"#c8bca0",lineHeight:"1.7",fontFamily:"Georgia,serif",whiteSpace:"pre-wrap"}}>{note.text}</p>
+                    </div>;
+                  })}
+                </div>
+              }
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── ADD BOOK FORM ─────────────────────────────────────────────────────────────
+function AddBookForm({onAdd,onClose,categories,defaultType}){
+  const [form,setForm]=useState({title:"",author:"",series:"",type:defaultType||Object.keys(categories)[0],pages:"",wordCount:"",wpm:"",pagesRead:"0"});
+  const set=(k,v)=>setForm(p=>({...p,[k]:v}));
+  const wpg=form.pages&&form.wordCount?Math.round(parseInt(form.wordCount)/parseInt(form.pages)):null;
+  const col=(categories[form.type]||{}).color||"#8a8070";
+  const handleAdd=()=>{
+    if(!form.title.trim()||!form.pages||!form.wpm)return;
+    const pages=parseInt(form.pages),wpm=parseInt(form.wpm);
+    if(pages<1||wpm<50)return;
+    onAdd({title:form.title.trim(),author:form.author.trim()||"Unknown",series:form.series.trim()||undefined,type:form.type,pages,wordCount:form.wordCount?parseInt(form.wordCount):pages*250,wpm,pagesRead:parseInt(form.pagesRead)||0});
+    onClose();
+  };
+  return (
+    <div style={{background:"#111008",border:`1px solid ${col}50`,borderRadius:"12px",padding:"20px",marginBottom:"16px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+        <div style={{fontSize:"13px",color:col,letterSpacing:"1px",textTransform:"uppercase",fontFamily:"sans-serif"}}>Add New Book</div>
+        <button onClick={onClose} style={{background:"transparent",border:"none",color:"#5a5038",cursor:"pointer",fontSize:"18px"}}>✕</button>
+      </div>
+      <div style={{display:"flex",gap:"10px",flexWrap:"wrap",marginBottom:"10px"}}>
+        <div style={{flex:2,minWidth:"140px"}}><label style={labelStyle}>Title *</label><input value={form.title} onChange={e=>set("title",e.target.value)} placeholder="Book title" style={textInputStyle}/></div>
+        <div style={{flex:1,minWidth:"110px"}}><label style={labelStyle}>Author</label><input value={form.author} onChange={e=>set("author",e.target.value)} placeholder="Author" style={textInputStyle}/></div>
+        <div style={{flex:1,minWidth:"100px"}}><label style={labelStyle}>Series</label><input value={form.series} onChange={e=>set("series",e.target.value)} placeholder="Optional" style={textInputStyle}/></div>
+      </div>
+      <div style={{display:"flex",gap:"10px",flexWrap:"wrap",marginBottom:"10px",alignItems:"flex-end"}}>
+        <div><label style={labelStyle}>Category</label>
+          <select value={form.type} onChange={e=>set("type",e.target.value)} style={{...textInputStyle,width:"160px",cursor:"pointer"}}>
+            {Object.entries(categories).map(([k,c])=><option key={k} value={k}>{c.icon} {c.label}</option>)}
+          </select>
+        </div>
+        <div><label style={labelStyle}>Pages *</label><input type="number" value={form.pages} onChange={e=>set("pages",e.target.value)} placeholder="e.g. 400" style={{...textInputStyle,width:"90px"}}/></div>
+        <div><label style={labelStyle}>Word Count</label><input type="number" value={form.wordCount} onChange={e=>set("wordCount",e.target.value)} placeholder="optional" style={{...textInputStyle,width:"110px"}}/></div>
+        {wpg&&<div style={{padding:"6px 10px",background:"#141208",border:"1px solid #2a2218",borderRadius:"6px",textAlign:"center"}}><div style={{fontSize:"9px",color:"#6a5a38",fontFamily:"sans-serif"}}>W/PG</div><div style={{fontSize:"16px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{wpg}</div></div>}
+        <div><label style={labelStyle}>Speed (wpm)*</label><input type="number" value={form.wpm} onChange={e=>set("wpm",e.target.value)} placeholder="250" style={{...textInputStyle,width:"90px"}}/></div>
+        <div><label style={labelStyle}>Already Read</label><input type="number" value={form.pagesRead} onChange={e=>set("pagesRead",e.target.value)} placeholder="0" style={{...textInputStyle,width:"90px"}}/></div>
+      </div>
+      <button onClick={handleAdd} style={{background:col,color:"#fff",border:"none",borderRadius:"7px",padding:"9px 20px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",fontWeight:"600"}}>+ Add to List</button>
+    </div>
+  );
+}
+
+// ─── SLOT PANEL ───────────────────────────────────────────────────────────────
+function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReorder,onDelete,onAddNew,onUpdateMins}){
+  const [selected,  setSelected]  = useState(null);
+  const [editKey,   setEditKey]   = useState(null);
+  const [showAdd,   setShowAdd]   = useState(false);
+  const [dragKey,   setDragKey]   = useState(null);
+  const [dragOver,  setDragOver]  = useState(null);
+  const col=category.color;
+  const totalDays=tl.reduce((s,t)=>s+t.days,0);
+  const lastEnd=tl.length>0?tl[tl.length-1].endDate:null;
+
+  const handleSelect=(key)=>{ if(selected===key){setSelected(null);return;} setSelected(key); };
+  const handleMoveHere=(targetKey)=>{
+    if(!selected||selected===targetKey){setSelected(null);return;}
+    const arr=[...order], from=arr.indexOf(selected), to=arr.indexOf(targetKey);
+    if(from<0||to<0)return;
+    arr.splice(from,1); arr.splice(to,0,selected);
+    onReorder(catKey,arr); setSelected(null);
+  };
+  const moveUp=(key)=>{ const a=[...order],i=a.indexOf(key); if(i>0){[a[i-1],a[i]]=[a[i],a[i-1]];onReorder(catKey,a);} };
+  const moveDown=(key)=>{ const a=[...order],i=a.indexOf(key); if(i<a.length-1){[a[i],a[i+1]]=[a[i+1],a[i]];onReorder(catKey,a);} };
+
+  const handleDragStart=(key)=>{ setDragKey(key); setSelected(null); };
+  const handleDragEnter=(targetKey)=>{ if(targetKey!==dragKey) setDragOver(targetKey); };
+  const handleDragEnd=()=>{
+    if(dragKey && dragOver && dragKey!==dragOver){
+      const arr=[...order], from=arr.indexOf(dragKey), to=arr.indexOf(dragOver);
+      if(from>=0&&to>=0){ arr.splice(from,1); arr.splice(to,0,dragKey); onReorder(catKey,arr); }
+    }
+    setDragKey(null); setDragOver(null);
+  };
+
+  return (
+    <div style={{background:"#111008",border:`1px solid ${col}35`,borderRadius:"12px",overflow:"hidden",marginBottom:"16px"}}>
+      <div style={{background:`linear-gradient(90deg,${col}18 0%,transparent 60%)`,borderBottom:`1px solid ${col}28`,padding:"12px 16px",display:"flex",alignItems:"center",gap:"10px"}}>
+        <span style={{fontSize:"20px"}}>{category.icon}</span>
+        <div style={{flex:1}}>
+          <div style={{fontSize:"13px",color:col,letterSpacing:"1.5px",textTransform:"uppercase",fontFamily:"sans-serif"}}>{category.label}</div>
+          <div style={{fontSize:"11px",color:"#4a4030",fontFamily:"sans-serif",marginTop:"1px"}}>
+            {order.length} books · {selected?"tap a row to place it here":"drag or tap ⠿ to reorder · ✎ to edit"}
+          </div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:"3px"}}>
+          <div style={{fontSize:"12px",color:"#7a6a40",fontFamily:"sans-serif"}}>{lastEnd?fmtDate(lastEnd):"—"}</div>
+          <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+            <span style={{fontSize:"10px",color:"#5a5038",fontFamily:"sans-serif"}}>{mpd}min/day</span>
+            <input type="range" min={5} max={120} step={5} value={mpd} onChange={e=>onUpdateMins(catKey,parseInt(e.target.value))} style={{width:"70px",accentColor:col}} title="Daily reading time"/>
+          </div>
+        </div>
+      </div>
+
+      {selected&&(
+        <div style={{background:col+"18",borderBottom:`1px solid ${col}30`,padding:"8px 14px",display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
+          <span style={{fontSize:"12px",color:col,fontFamily:"sans-serif",flex:1}}>Moving: <b>{books[selected]?.title}</b></span>
+          <button onClick={()=>moveUp(selected)} style={{background:"transparent",border:`1px solid ${col}50`,color:col,borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↑</button>
+          <button onClick={()=>moveDown(selected)} style={{background:"transparent",border:`1px solid ${col}50`,color:col,borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↓</button>
+          <button onClick={()=>setSelected(null)} style={{background:"transparent",border:"1px solid #4a3020",color:"#7a5040",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>Cancel</button>
+        </div>
+      )}
+
+      <div style={{padding:"12px"}}>
+        {order.map((key,i)=>{
+          const t=tl.find(x=>x.key===key);
+          return <BookRow key={key} bookKey={key} books={books} tl={t} mpd={mpd} categories={categories}
+            onUpdate={onUpdate} onDelete={onDelete}
+            isSelected={selected===key} onSelect={handleSelect}
+            isMoveTarget={!!selected&&selected!==key} onMoveHere={handleMoveHere}
+            showEdit={editKey===key} onToggleEdit={k=>setEditKey(p=>p===k?null:k)}
+            onDragStart={handleDragStart} onDragEnter={handleDragEnter} onDragEnd={handleDragEnd}
+            isDragging={dragKey===key} isDragOver={dragOver===key}
+            idx={i}/>;
+        })}
+        {showAdd&&<AddBookForm onAdd={(d)=>onAddNew(catKey,d)} onClose={()=>setShowAdd(false)} categories={categories} defaultType={catKey}/>}
+        <button onClick={()=>setShowAdd(v=>!v)} style={{width:"100%",background:"transparent",border:`1px dashed ${col}40`,color:col+"99",borderRadius:"7px",padding:"8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",marginTop:"4px"}}>+ Add book</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── PROGRESS LOG ─────────────────────────────────────────────────────────────
+function ProgressLog({books,order,categories,log,onAddEntry,onDeleteEntry}){
+  const today=todayStr();
+  const [date,setDate]=useState(today);
+  const catKeys=Object.keys(categories);
+  const initEntries=()=>{ const o={}; catKeys.forEach(k=>{ o[k]={key:(order[k]||[])[0]||"",pages:"",mins:""}; }); return o; };
+  const [entries,setEntries]=useState(initEntries);
+  const setEntry=(type,field,val)=>setEntries(p=>({...p,[type]:{...p[type],[field]:val}}));
+
+  const handleSubmit=()=>{
+    const toAdd=[];
+    catKeys.forEach(type=>{
+      const e=entries[type]; const pages=parseInt(e.pages);
+      if(e.key&&pages>0) toAdd.push({type,bookKey:e.key,pagesRead:pages,minsRead:parseInt(e.mins)||0,date});
+    });
+    if(!toAdd.length)return;
+    onAddEntry(toAdd);
+    setEntries(initEntries());
+  };
+
+  const grouped={};
+  log.forEach(e=>{if(!grouped[e.date])grouped[e.date]=[]; grouped[e.date].push(e);});
+  const sortedDates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
+
+  return (
+    <div>
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"18px",marginBottom:"16px"}}>
+        <div style={{fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif",marginBottom:"14px"}}>Log Today's Reading</div>
+        <div style={{marginBottom:"14px"}}><label style={labelStyle}>Date</label><input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...textInputStyle,width:"160px",colorScheme:"dark"}}/></div>
+        {catKeys.map(type=>{
+          const cat=categories[type]; const col=cat.color; const e=entries[type]||{key:"",pages:"",mins:""};
+          const booksOfType=order[type]||[];
+          return (
+            <div key={type} style={{background:"#0d0c0a",border:`1px solid ${col}28`,borderLeft:`3px solid ${col}`,borderRadius:"8px",padding:"12px",marginBottom:"8px"}}>
+              <div style={{fontSize:"11px",color:col,letterSpacing:"1px",textTransform:"uppercase",fontFamily:"sans-serif",marginBottom:"8px"}}>{cat.icon} {cat.label}</div>
+              <div style={{display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"flex-end"}}>
+                <div style={{flex:2,minWidth:"160px"}}><label style={labelStyle}>Book</label>
+                  <select value={e.key||""} onChange={ev=>setEntry(type,"key",ev.target.value)} style={{...textInputStyle,cursor:"pointer"}}>
+                    <option value="">— skip —</option>
+                    {booksOfType.map(k=>books[k]&&<option key={k} value={k}>{books[k].title}</option>)}
+                  </select>
+                </div>
+                <div><label style={labelStyle}>Pages</label><NumInput value={e.pages} min={0} max={9999} width="80px" onChange={ev=>setEntry(type,"pages",ev.target.value)} onBlur={()=>{}} style={{borderColor:col+"50"}}/></div>
+                <div><label style={labelStyle}>Minutes</label><NumInput value={e.mins} min={0} max={999} width="80px" onChange={ev=>setEntry(type,"mins",ev.target.value)} onBlur={()=>{}} style={{borderColor:col+"50"}}/></div>
+                {e.pages&&e.mins&&parseInt(e.mins)>0&&e.key&&books[e.key]&&(
+                  <div style={{padding:"5px 10px",background:"#141208",border:"1px solid #2a2218",borderRadius:"6px",textAlign:"center"}}>
+                    <div style={{fontSize:"9px",color:"#6a5a38",fontFamily:"sans-serif"}}>WPM</div>
+                    <div style={{fontSize:"16px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{Math.round(parseInt(e.pages)*wordsPerPage(books[e.key])/parseInt(e.mins))}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        <button onClick={handleSubmit} style={{background:"#3a7a5a",color:"#fff",border:"none",borderRadius:"7px",padding:"10px 24px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",fontWeight:"600",marginTop:"6px"}}>✓ Save Session</button>
+      </div>
+
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"18px"}}>
+        <div style={{fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif",marginBottom:"14px"}}>History ({log.length})</div>
+        {sortedDates.length===0&&<div style={{color:"#5a5038",fontFamily:"sans-serif",fontSize:"13px",fontStyle:"italic",textAlign:"center",padding:"20px"}}>No sessions yet.</div>}
+        {sortedDates.map(d=>(
+          <div key={d} style={{marginBottom:"12px"}}>
+            <div style={{fontSize:"12px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"600",marginBottom:"6px",borderBottom:"1px solid #2a2318",paddingBottom:"4px"}}>{fmtDateStr(d)}</div>
+            {grouped[d].map((e,i)=>{
+              const b=books[e.bookKey]; if(!b)return null;
+              const col=(categories[b.type]||{}).color||"#8a8070";
+              const actualWpm=e.minsRead>0?Math.round(e.pagesRead*wordsPerPage(b)/e.minsRead):null;
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:"10px",padding:"7px 10px",background:"#0d0c0a",border:`1px solid ${col}28`,borderLeft:`3px solid ${col}`,borderRadius:"6px",marginBottom:"5px"}}>
+                  <div style={{flex:1}}><span style={{fontSize:"13px",color:"#d4c8a8"}}>{b.title}</span></div>
+                  <div style={{display:"flex",gap:"12px",fontSize:"12px",fontFamily:"sans-serif",flexShrink:0}}>
+                    <span style={{color:col}}><b>{e.pagesRead}</b>pp</span>
+                    {e.minsRead>0&&<span style={{color:"#7a6a4a"}}>{e.minsRead}m</span>}
+                    {actualWpm&&<span style={{color:"#c9a84c",fontSize:"11px"}}>{actualWpm}wpm</span>}
+                  </div>
+                  <button onClick={()=>onDeleteEntry(e.id)} style={{background:"transparent",border:"none",color:"#5a3020",cursor:"pointer",fontSize:"14px"}}>✕</button>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── TIMELINE ─────────────────────────────────────────────────────────────────
+function TimelineView({timelines,books,categories}){
+  const allEntries=Object.values(timelines).flat();
+  if(!allEntries.length)return <div style={{color:"#5a5038",fontFamily:"sans-serif",textAlign:"center",padding:"40px"}}>No books yet.</div>;
+  const maxDate=allEntries.reduce((m,e)=>e.endDate>m?e.endDate:m,START_DATE);
+  const pct=d=>Math.max(0,Math.min(100,((d-START_DATE)/(maxDate-START_DATE))*100));
+  const markers=[]; let cur=new Date(START_DATE.getFullYear(),START_DATE.getMonth(),1);
+  while(cur<=maxDate){markers.push(new Date(cur));cur=new Date(cur.getFullYear(),cur.getMonth()+1,1);}
+  return (
+    <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"20px",marginBottom:"16px"}}>
+      <div style={{fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif",marginBottom:"16px"}}>Calendar Timeline · {fmtDate(START_DATE)} → {fmtDate(maxDate)}</div>
+      <div style={{position:"relative",height:"18px",marginBottom:"8px"}}>
+        {markers.map((m,i)=>{const l=pct(m);if(l>99||l<0)return null;return <div key={i} style={{position:"absolute",left:`${l}%`,top:0,borderLeft:"1px solid #2a2318"}}><span style={{fontSize:"9px",color:"#5a5038",fontFamily:"sans-serif",paddingLeft:"3px",whiteSpace:"nowrap"}}>{m.toLocaleDateString("en-US",{month:"short",year:"2-digit"})}</span></div>;})}
+      </div>
+      {Object.entries(categories).map(([catKey,cat])=>(
+        <div key={catKey} style={{marginBottom:"12px"}}>
+          <div style={{fontSize:"10px",color:cat.color,letterSpacing:"1px",fontFamily:"sans-serif",marginBottom:"4px",textTransform:"uppercase"}}>{cat.icon} {cat.label}</div>
+          <div style={{position:"relative",height:"30px",background:"#0a0908",borderRadius:"5px",overflow:"hidden"}}>
+            {(timelines[catKey]||[]).map((e,i)=>{const l=pct(e.startDate),w=Math.max(0.2,pct(e.endDate)-l);return <div key={e.key} title={`${books[e.key]?.title}\n${fmtDate(e.startDate)} → ${fmtDate(e.endDate)}`} style={{position:"absolute",left:`${l}%`,width:`${w}%`,height:"100%",background:i%2===0?cat.color:cat.color+"88",borderRight:"2px solid #0a0908",display:"flex",alignItems:"center",overflow:"hidden",cursor:"default"}}><span style={{fontSize:"9px",color:"rgba(255,255,255,0.9)",fontFamily:"sans-serif",padding:"0 5px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{books[e.key]?.title}</span></div>;})}</div>
+        </div>
+      ))}
+      <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",marginTop:"8px",fontStyle:"italic"}}>Hover bars for dates</div>
+    </div>
+  );
+}
+
+// ─── TABLE ────────────────────────────────────────────────────────────────────
+function TableView({timelines,books,categories}){
+  const all=Object.entries(timelines).flatMap(([catKey,tl])=>tl.map(t=>({...t,catKey}))).sort((a,b)=>a.startDate-b.startDate);
+  return (
+    <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",overflow:"hidden",marginBottom:"16px"}}>
+      <div style={{padding:"12px 16px",borderBottom:"1px solid #2a2318",fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif"}}>All Books — Projected Dates</div>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px",fontFamily:"sans-serif"}}>
+          <thead><tr style={{background:"#0d0c0a"}}>{["#","Book","Category","Left","Days","Start","Finish"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:"left",color:"#5a5038",fontWeight:"normal",letterSpacing:"1px",borderBottom:"1px solid #2a2318",whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+          <tbody>{all.map((t,i)=>{
+            const b=books[t.key]; if(!b)return null;
+            const cat=categories[b.type]||{color:"#8a8070",label:b.type};
+            return <tr key={t.key} style={{borderBottom:"1px solid #1a1810",background:i%2===0?"transparent":"#0d0c0a"}}>
+              <td style={{padding:"8px 12px",color:"#4a4030"}}>{i+1}</td>
+              <td style={{padding:"8px 12px"}}><div style={{color:"#d4c8a8"}}>{b.title}</div><div style={{color:"#6a5a38",fontSize:"11px",fontStyle:"italic"}}>{b.author}{b.series?` · ${b.series}`:""}</div></td>
+              <td style={{padding:"8px 12px"}}><Pill color={cat.color}>{cat.label}</Pill></td>
+              <td style={{padding:"8px 12px",color:"#7a6a4a"}}>{calcPagesLeft(b)}pp</td>
+              <td style={{padding:"8px 12px",color:cat.color,fontWeight:"bold"}}>~{t.days}</td>
+              <td style={{padding:"8px 12px",color:"#8a7a50",whiteSpace:"nowrap"}}>{fmtDate(t.startDate)}</td>
+              <td style={{padding:"8px 12px",color:"#c0a860",fontWeight:"600",whiteSpace:"nowrap"}}>{fmtDate(t.endDate)}</td>
+            </tr>;
+          })}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── ALL NOTES ────────────────────────────────────────────────────────────────
+function AllNotesView({books,categories}){
+  const [filter,setFilter]=useState("all");
+  const [search,setSearch]=useState("");
+  const allNotes=[];
+  Object.entries(books).forEach(([key,b])=>{
+    (b.notes||[]).forEach(note=>allNotes.push({...note,bookKey:key,bookTitle:b.title,bookType:b.type}));
+  });
+  allNotes.sort((a,b)=>new Date(b.date)-new Date(a.date));
+  const filtered=allNotes.filter(n=>{
+    if(filter!=="all"&&n.bookType!==filter)return false;
+    if(search&&!n.text.toLowerCase().includes(search.toLowerCase())&&!n.bookTitle.toLowerCase().includes(search.toLowerCase()))return false;
+    return true;
+  });
+  return (
+    <div>
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"14px 16px",marginBottom:"14px",display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"center"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search notes…" style={{flex:1,minWidth:"160px",background:"#1a1810",border:"1px solid #3a3020",color:"#f0e4cc",borderRadius:"6px",padding:"6px 10px",fontSize:"13px",fontFamily:"sans-serif"}}/>
+        <div style={{display:"flex",gap:"5px",flexWrap:"wrap"}}>
+          <button onClick={()=>setFilter("all")} style={{background:filter==="all"?"#2a2010":"transparent",border:`1px solid ${filter==="all"?"#6a5028":"#2e2818"}`,color:filter==="all"?"#d4b870":"#6a5a38",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>All</button>
+          {Object.entries(categories).map(([k,c])=>(
+            <button key={k} onClick={()=>setFilter(k)} style={{background:filter===k?c.color+"30":"transparent",border:`1px solid ${filter===k?c.color:"#2e2818"}`,color:filter===k?c.color:"#6a5a38",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>{c.icon} {c.label}</button>
+          ))}
+        </div>
+        <span style={{fontSize:"11px",color:"#4a4030",fontFamily:"sans-serif"}}>{filtered.length} note{filtered.length!==1?"s":""}</span>
+      </div>
+      {filtered.length===0
+        ?<div style={{textAlign:"center",padding:"60px 20px",color:"#4a4030",fontFamily:"sans-serif",fontStyle:"italic"}}>{allNotes.length===0?"No notes yet. Open any book (✎) → Notes tab to start writing.":"No notes match your filter."}</div>
+        :<div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
+          {filtered.map(note=>{
+            const col=(categories[note.bookType]||{}).color||"#8a8070";
+            const d=new Date(note.date);
+            return <div key={note.id} style={{background:"#111008",border:`1px solid ${col}28`,borderLeft:`3px solid ${col}`,borderRadius:"10px",padding:"14px 16px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:"12px",marginBottom:"8px"}}>
+                <div>
+                  <div style={{fontSize:"14px",color:"#d4c8a8",fontFamily:"Georgia,serif"}}>{note.bookTitle}</div>
+                  <div style={{display:"flex",gap:"8px",alignItems:"center",marginTop:"3px",flexWrap:"wrap"}}>
+                    <Pill color={col}>{(categories[note.bookType]||{}).label||note.bookType}</Pill>
+                    {note.page>0&&<span style={{fontSize:"10px",color:"#5a5038",fontFamily:"sans-serif"}}>p.{note.page}</span>}
+                    <span style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif"}}>{fmtDate(d)} · {d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}</span>
+                  </div>
+                </div>
+              </div>
+              <p style={{margin:0,fontSize:"13px",color:"#c0b490",lineHeight:"1.8",fontFamily:"Georgia,serif",whiteSpace:"pre-wrap"}}>{note.text}</p>
+            </div>;
+          })}
+        </div>
+      }
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App(){
+  const [user,    setUser]    = useState(undefined); // undefined=loading, null=signed out
+  const [books,   setBooks]   = useState({});
+  const [order,   setOrder]   = useState({});
+  const [mpd,     setMpd]     = useState({});  // minsPerDay per category
+  const [log,     setLog]     = useState([]);
+  const [cats,    setCats]    = useState(INIT_CATEGORIES);
+  const [view,    setView]    = useState("list");
+  const [toast,   setToast]   = useState(false);
+  const [sync,    setSync]    = useState("loading");
+  const [showCatMgr, setShowCatMgr] = useState(false);
+  const saveTimer = useRef(null);
+
+  // ── Auth listener ──
+  useEffect(()=>{
+    return window.auth.onAuthStateChanged(u=>setUser(u||null));
+  },[]);
+
+  // ── Load data when user signs in ──
+  useEffect(()=>{
+    if(!user) return;
+    setSync("loading");
+    const local=loadLocal(user.uid);
+    if(local){ applyState(local); }
+    loadCloud(user.uid).then(cloud=>{
+      if(cloud&&cloud.books){ applyState(cloud); saveLocal(user.uid,cloud); }
+      setSync("synced");
+    }).catch(()=>setSync("offline"));
+  },[user]);
+
+  const applyState=(s)=>{
+    if(s.books)   setBooks(s.books);
+    if(s.order)   setOrder(s.order);
+    if(s.minsPerDay) setMpd(s.minsPerDay);
+    if(s.log)     setLog(s.log);
+    if(s.categories) setCats(s.categories);
+  };
+
+  // ── Auto-save ──
+  useEffect(()=>{
+    if(!user) return;
+    const state={books,order,minsPerDay:mpd,log,categories:cats};
+    saveLocal(user.uid,state);
+    setSync("saving");
+    clearTimeout(saveTimer.current);
+    saveTimer.current=setTimeout(()=>{ saveCloud(user.uid,state); setSync("synced"); },1500);
+    return ()=>clearTimeout(saveTimer.current);
+  },[books,order,mpd,log,cats]);
+
+  const showToast=(msg)=>{ setToast(msg||"✓ Saved"); setTimeout(()=>setToast(false),2500); };
+
+  // ── First-time setup: new users start blank ──
+  useEffect(()=>{
+    if(!user||Object.keys(books).length>0) return;
+    if(!loadLocal(user.uid)){
+      // Brand new user — start completely empty with default categories
+      setCats(INIT_CATEGORIES);
+      setOrder({ cat1:[], cat2:[] });
+      setMpd({ cat1:20, cat2:20 });
+      setBooks({});
+    }
+  },[user]);
+
+  // ── When categories change, ensure order/mpd have entries for all cats ──
+  useEffect(()=>{
+    setOrder(prev=>{ const n={...prev}; Object.keys(cats).forEach(k=>{ if(!n[k])n[k]=[]; }); return n; });
+    setMpd(prev=>{ const n={...prev}; Object.keys(cats).forEach(k=>{ if(!n[k])n[k]=20; }); return n; });
+  },[cats]);
+
+  const updateBook=useCallback((key,field,value)=>{ setBooks(p=>({...p,[key]:{...p[key],[field]:value}})); },[]);
+  const reorder=useCallback((type,arr)=>{ setOrder(p=>({...p,[type]:arr})); },[]);
+  const deleteBook=useCallback((key)=>{
+    setBooks(p=>{ const n={...p}; delete n[key]; return n; });
+    setOrder(p=>{ const n={...p}; Object.keys(n).forEach(t=>{n[t]=n[t].filter(k=>k!==key);}); return n; });
+  },[]);
+  const addBook=useCallback((type,data)=>{
+    const key=genKey();
+    setBooks(p=>({...p,[key]:data}));
+    setOrder(p=>({...p,[type]:[...(p[type]||[]),key]}));
+  },[]);
+  const updateMins=useCallback((type,val)=>{ setMpd(p=>({...p,[type]:val})); },[]);
+
+  const addLogEntries=useCallback((entries)=>{
+    const newEntries=entries.map(e=>({...e,id:genKey()}));
+    newEntries.forEach(e=>{
+      setBooks(prev=>{
+        const b=prev[e.bookKey]; if(!b)return prev;
+        const nr=Math.min(b.pages,(b.pagesRead||0)+e.pagesRead);
+        let nb={...b,pagesRead:nr};
+        if(e.minsRead>0){
+          const aw=Math.round(e.pagesRead*wordsPerPage(b)/e.minsRead);
+          if(aw>=50&&aw<=1500) nb.wpm=Math.round(b.wpm*0.8+aw*0.2);
+        }
+        return {...prev,[e.bookKey]:nb};
+      });
+    });
+    setLog(p=>[...p,...newEntries]);
+    showToast();
+  },[]);
+
+  const deleteLogEntry=useCallback((id)=>{
+    setLog(p=>{ const e=p.find(x=>x.id===id); if(!e)return p;
+      setBooks(prev=>{ const b=prev[e.bookKey]; if(!b)return prev; return {...prev,[e.bookKey]:{...b,pagesRead:Math.max(0,(b.pagesRead||0)-e.pagesRead)}}; });
+      return p.filter(x=>x.id!==id);
+    });
+  },[]);
+
+  const handleExport=()=>{
+    const state={books,order,minsPerDay:mpd,log,categories:cats};
+    const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=`reading-backup-${todayStr()}.json`; a.click();
+    URL.revokeObjectURL(url); showToast("✓ Exported!");
+  };
+  const handleImport=()=>{
+    const input=document.createElement("input"); input.type="file"; input.accept=".json";
+    input.onchange=e=>{
+      const file=e.target.files[0]; if(!file)return;
+      const reader=new FileReader();
+      reader.onload=ev=>{
+        try{
+          const data=JSON.parse(ev.target.result);
+          if(!data.books||!data.order)throw new Error("Invalid");
+          if(!window.confirm("Replace current data with this backup?"))return;
+          applyState(data); showToast("✓ Imported!");
+        }catch{ alert("Couldn't read that file."); }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  };
+
+  // ── Build timelines ──
+  const timelines={};
+  Object.keys(cats).forEach(k=>{ timelines[k]=buildTimeline(order[k]||[],books,mpd[k]||20); });
+
+  const allEnds=Object.values(timelines).flat().map(t=>t.endDate);
+  const lastDate=allEnds.length?allEnds.reduce((m,d)=>d>m?d:m,START_DATE):START_DATE;
+  const totalDays=Math.ceil((lastDate-START_DATE)/86400000);
+  const totalHrs=Math.round(Object.values(books).reduce((s,b)=>s+calcPagesLeft(b)*wordsPerPage(b)/b.wpm/60,0));
+  const totalBooks=Object.keys(books).length;
+  const doneBooks=Object.values(books).filter(b=>calcPagesLeft(b)===0).length;
+
+  // ── Auth loading ──
+  if(user===undefined) return <div style={{minHeight:"100vh",background:"#0d0c0a",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{color:"#6a5a38",fontFamily:"sans-serif"}}>Loading…</div></div>;
+  if(user===null) return <LoginScreen/>;
+
+  const NavBtn=({id,label})=>(
+    <button onClick={()=>setView(id)} style={{background:view===id?"#221e10":"transparent",border:`1px solid ${view===id?"#6a5028":"#2e2818"}`,color:view===id?"#d4b870":"#6a5a38",borderRadius:"7px",padding:"7px 14px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",transition:"all 0.15s",whiteSpace:"nowrap"}}>{label}</button>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0d0c0a",color:"#e0d4bc",fontFamily:"Georgia,serif"}}>
+
+      {showCatMgr&&<CategoryManager categories={cats} onUpdate={c=>{ setCats(c); setShowCatMgr(false); }} onClose={()=>setShowCatMgr(false)}/>}
+
+      {/* SYNC + TOAST */}
+      <div style={{position:"fixed",top:"16px",right:"16px",display:"flex",flexDirection:"column",gap:"6px",alignItems:"flex-end",zIndex:998,pointerEvents:"none"}}>
+        <div style={{background:sync==="synced"?"#1a3a2a":sync==="saving"?"#1a2a3a":sync==="offline"?"#3a1a10":"#1a1a2a",border:`1px solid ${sync==="synced"?"#3a7a5a":sync==="saving"?"#3a5a7a":sync==="offline"?"#7a3a20":"#3a3a5a"}`,color:sync==="synced"?"#7aaa8a":sync==="saving"?"#7a9aaa":sync==="offline"?"#aa7a6a":"#9a9aaa",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",fontFamily:"sans-serif",display:"flex",alignItems:"center",gap:"6px"}}>
+          <span style={{fontSize:"8px"}}>{sync==="synced"?"●":sync==="offline"?"○":"◌"}</span>
+          {sync==="synced"?"Synced":sync==="saving"?"Saving…":sync==="offline"?"Offline":"Connecting…"}
+        </div>
+        {toast&&<div style={{background:"#2a2a1a",border:"1px solid #5a5a2a",color:"#aaaa7a",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",fontFamily:"sans-serif"}}>{toast}</div>}
+      </div>
+
+      {/* HEADER */}
+      <div style={{padding:"32px 24px 24px",textAlign:"center",borderBottom:"1px solid #1e1c14",background:"linear-gradient(180deg,#141208 0%,#0d0c0a 100%)",position:"relative",overflow:"hidden"}}>
+        {Object.values(cats).slice(0,3).map((c,i)=>(
+          <div key={i} style={{position:"absolute",width:"220px",height:"220px",borderRadius:"50%",background:`radial-gradient(circle,${c.color}10 0%,transparent 70%)`,top:i===1?"-60px":"10px",left:i===0?"-40px":i===2?"auto":"50%",right:i===2?"-40px":"auto",transform:i===1?"translateX(-50%)":"none",pointerEvents:"none"}}/>
+        ))}
+        <div style={{position:"relative"}}>
+          <div style={{fontSize:"10px",letterSpacing:"5px",color:"#6a5a30",textTransform:"uppercase",marginBottom:"6px",fontFamily:"sans-serif"}}>
+            {user.displayName||user.email}
+          </div>
+          <h1 style={{fontSize:"clamp(22px,6vw,40px)",fontWeight:"normal",margin:"0 0 6px",color:"#f0e4cc",letterSpacing:"-0.5px"}}>Reading Schedule</h1>
+          <div style={{display:"flex",justifyContent:"center",gap:"6px",flexWrap:"wrap",marginBottom:"14px"}}>
+            {[["~"+totalHrs+"h","hours left"],["~"+Math.round(totalDays/7)+"wks","to finish"],[fmtDate(lastDate),"final date"],[doneBooks+"/"+totalBooks,"done"]].map(([v,l])=>(
+              <div key={l} style={{background:"#181510",border:"1px solid #2a2218",borderRadius:"8px",padding:"6px 12px",minWidth:"75px"}}>
+                <div style={{fontSize:"13px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{v}</div>
+                <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif"}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",justifyContent:"center",gap:"5px",flexWrap:"wrap",marginBottom:"10px"}}>
+            <NavBtn id="list"     label="📚 Books"/>
+            <NavBtn id="timeline" label="📅 Timeline"/>
+            <NavBtn id="table"    label="🗓 Dates"/>
+            <NavBtn id="progress" label="✏️ Log"/>
+            <NavBtn id="notes"    label="📝 Notes"/>
+          </div>
+          <div style={{display:"flex",justifyContent:"center",gap:"6px",flexWrap:"wrap"}}>
+            <button onClick={()=>setShowCatMgr(true)} style={{background:"transparent",border:"1px solid #4a3a5a",color:"#8a7aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⚙ Categories</button>
+            <button onClick={handleExport} style={{background:"transparent",border:"1px solid #3a7a5a",color:"#5aaa7a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬇ Export</button>
+            <button onClick={handleImport} style={{background:"transparent",border:"1px solid #3a4a7a",color:"#6a7aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬆ Import</button>
+            <button onClick={()=>window.auth.signOut()} style={{background:"transparent",border:"1px solid #4a2a2a",color:"#8a5a5a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>Sign out</button>
+          </div>
+        </div>
+      </div>
+
+      {/* CONTENT */}
+      <div style={{maxWidth:"780px",margin:"0 auto",padding:"20px 14px 60px"}}>
+        {view==="list"&&(
+          <>
+            {Object.keys(books).length===0 && (
+              <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"32px 24px",textAlign:"center",marginBottom:"16px"}}>
+                <div style={{fontSize:"40px",marginBottom:"12px"}}>📚</div>
+                <div style={{fontSize:"18px",color:"#f0e4cc",fontFamily:"Georgia,serif",marginBottom:"8px"}}>Welcome to your reading tracker!</div>
+                <div style={{fontSize:"13px",color:"#6a5a40",fontStyle:"italic",marginBottom:"20px",lineHeight:"1.7"}}>
+                  Add your first book using the button below any category.<br/>
+                  Use <b style={{color:"#9a7a50"}}>⚙ Categories</b> to rename or add reading types.<br/>
+                  Set how many minutes per day you read each type using the slider on each category.
+                </div>
+                <div style={{display:"flex",justifyContent:"center",gap:"10px",flexWrap:"wrap"}}>
+                  <button onClick={()=>setShowCatMgr(true)} style={{background:"#2a2010",border:"1px solid #6a5028",color:"#c9a84c",borderRadius:"8px",padding:"9px 18px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif"}}>⚙ Set up categories first</button>
+                </div>
+              </div>
+            )}
+            <div style={{fontSize:"12px",color:"#5a5038",fontFamily:"sans-serif",marginBottom:"12px",textAlign:"center",fontStyle:"italic"}}>
+              Drag or tap ⠿ to reorder · ✎ to edit · min/day slider on each category header
+            </div>
+            {Object.entries(cats).map(([catKey,cat])=>(
+              <SlotPanel key={catKey} catKey={catKey} category={cat} order={order[catKey]||[]} books={books}
+                tl={timelines[catKey]||[]} mpd={mpd[catKey]||20} categories={cats}
+                onUpdate={updateBook} onReorder={reorder} onDelete={deleteBook}
+                onAddNew={addBook} onUpdateMins={updateMins}/>
+            ))}
+          </>
+        )}
+        {view==="timeline"&&<TimelineView timelines={timelines} books={books} categories={cats}/>}
+        {view==="table"   &&<TableView    timelines={timelines} books={books} categories={cats}/>}
+        {view==="progress"&&<ProgressLog  books={books} order={order} categories={cats} log={log} onAddEntry={addLogEntries} onDeleteEntry={deleteLogEntry}/>}
+        {view==="notes"   &&<AllNotesView books={books} categories={cats}/>}
+      </div>
+    </div>
+  );
+}
+
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(React.createElement(App));
+  </script>
+</body>
+</html>
