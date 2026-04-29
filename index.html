@@ -62,14 +62,20 @@
       messagingSenderId: "1063759778997",
       appId: "1:1063759778997:web:5851c37e74d020abd59afc"
     };
-    firebase.initializeApp(firebaseConfig);
-    window.db   = firebase.firestore();
-    window.auth = firebase.auth();
+    try {
+      firebase.initializeApp(firebaseConfig);
+      window.db   = firebase.firestore();
+      window.auth = firebase.auth();
+      window._firebaseOk = true;
+    } catch(e) {
+      window._firebaseError = e.message;
+      console.error('Firebase init failed:', e);
+    }
   </script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <script type="text/babel" data-presets="react">
+  <script type="text/babel" data-presets="react" data-plugins="transform-optional-chaining,transform-nullish-coalescing-operator,transform-class-properties">
   const { useState, useCallback, useEffect, useRef } = React;
 
 // CONSTANTS 
@@ -156,9 +162,16 @@ function isSafePayload(state){
 }
 
 // Sanitize strings: strip control chars, cap length 
-function sanitizeStr(s, maxLen=2000){
+function sanitizeStr(s, maxLen){
+  maxLen = maxLen || 2000;
   if(typeof s !== "string") return "";
-  return s.replace(/[ --]/g, "").slice(0, maxLen);
+  // Remove control characters without regex char class ranges (Babel-safe)
+  var out = "";
+  for(var i=0;i<s.length;i++){
+    var code = s.charCodeAt(i);
+    if(code > 8 && code !== 11 && code !== 12 && code > 13 && code !== 127) out += s[i];
+  }
+  return out.slice(0, maxLen);
 }
 function sanitizeBook(b){
   if(!b || typeof b !== "object") return null;
@@ -577,7 +590,7 @@ function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReo
 
       {selected&&(
         <div style={{background:col+"18",borderBottom:`1px solid ${col}30`,padding:"8px 14px",display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
-          <span style={{fontSize:"12px",color:col,fontFamily:"sans-serif",flex:1}}>Moving: <b>{books[selected]?.title}</b></span>
+          <span style={{fontSize:"12px",color:col,fontFamily:"sans-serif",flex:1}}>Moving: <b>{(books[selected] ? books[selected].title : '')}</b></span>
           <button onClick={()=>moveUp(selected)} style={{background:"transparent",border:`1px solid ${col}50`,color:col,borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↑</button>
           <button onClick={()=>moveDown(selected)} style={{background:"transparent",border:`1px solid ${col}50`,color:col,borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↓</button>
           <button onClick={()=>setSelected(null)} style={{background:"transparent",border:"1px solid #4a3020",color:"#7a5040",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>Cancel</button>
@@ -707,7 +720,7 @@ function TimelineView({timelines,books,categories}){
         <div key={catKey} style={{marginBottom:"12px"}}>
           <div style={{fontSize:"10px",color:cat.color,letterSpacing:"1px",fontFamily:"sans-serif",marginBottom:"4px",textTransform:"uppercase"}}>{cat.icon} {cat.label}</div>
           <div style={{position:"relative",height:"30px",background:"#0a0908",borderRadius:"5px",overflow:"hidden"}}>
-            {(timelines[catKey]||[]).map((e,i)=>{const l=pct(e.startDate),w=Math.max(0.2,pct(e.endDate)-l);return <div key={e.key} title={`${books[e.key]?.title}\n${fmtDate(e.startDate)} → ${fmtDate(e.endDate)}`} style={{position:"absolute",left:`${l}%`,width:`${w}%`,height:"100%",background:i%2===0?cat.color:cat.color+"88",borderRight:"2px solid #0a0908",display:"flex",alignItems:"center",overflow:"hidden",cursor:"default"}}><span style={{fontSize:"9px",color:"rgba(255,255,255,0.9)",fontFamily:"sans-serif",padding:"0 5px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{books[e.key]?.title}</span></div>;})}</div>
+            {(timelines[catKey]||[]).map((e,i)=>{const l=pct(e.startDate),w=Math.max(0.2,pct(e.endDate)-l);return <div key={e.key} title={`${(books[e.key] ? books[e.key].title : '')}\n${fmtDate(e.startDate)} → ${fmtDate(e.endDate)}`} style={{position:"absolute",left:`${l}%`,width:`${w}%`,height:"100%",background:i%2===0?cat.color:cat.color+"88",borderRight:"2px solid #0a0908",display:"flex",alignItems:"center",overflow:"hidden",cursor:"default"}}><span style={{fontSize:"9px",color:"rgba(255,255,255,0.9)",fontFamily:"sans-serif",padding:"0 5px",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{(books[e.key] ? books[e.key].title : '')}</span></div>;})}</div>
         </div>
       ))}
       <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",marginTop:"8px",fontStyle:"italic"}}>Hover bars for dates</div>
