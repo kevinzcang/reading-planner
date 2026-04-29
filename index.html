@@ -100,10 +100,12 @@ const INIT_MINS = { cat1:20, cat2:20 };
 
 // HELPERS 
 function wordsPerPage(book) { return (book.wordCount && book.pages) ? book.wordCount/book.pages : 250; }
+function effectiveWpm(book) { return book.wpm || 250; }
 function calcPagesLeft(book) { return Math.max(0, book.pages - (book.pagesRead||0)); }
 function pctLeft(book) { return book.pages===0 ? 0 : Math.round((calcPagesLeft(book)/book.pages)*100); }
 function calcDaysForBook(book, mpd) {
-  const mins = calcPagesLeft(book) * wordsPerPage(book) / book.wpm;
+  const wpm = book.wpm || 250; // default 250 wpm if not set
+  const mins = calcPagesLeft(book) * wordsPerPage(book) / wpm;
   return Math.max(1, Math.round(mins / mpd));
 }
 function addDays(date,n){ const d=new Date(date); d.setDate(d.getDate()+n); return d; }
@@ -189,7 +191,7 @@ function sanitizeBook(b){
                  : [],
     pages:     Math.min(Math.max(0, parseInt(b.pages)||0), 99999),
     wordCount: Math.min(Math.max(0, parseInt(b.wordCount)||0), 9999999),
-    wpm:       Math.min(Math.max(10, parseInt(b.wpm)||250), 2000),
+    wpm:       b.wpm ? Math.min(Math.max(10, parseInt(b.wpm)||0), 2000) : 0, // 0 = not set, use default
     pagesRead: Math.min(Math.max(0, parseInt(b.pagesRead)||0), 99999),
     type:      sanitizeStr(b.type || "", 100),
   };
@@ -221,7 +223,9 @@ function sanitizeState(state){
         date:      sanitizeStr(e.date||"",20),
       }))
     : [];
-  return { books, categories:cats, order:state.order||{}, minsPerDay:state.minsPerDay||{}, log };
+  // Preserve shelf, readMode, seqOrder as-is (they're simple enough)
+  return { books, categories:cats, order:state.order||{}, minsPerDay:state.minsPerDay||{}, log,
+           shelf:state.shelf||{}, readMode:state.readMode||"parallel", seqOrder:state.seqOrder||[] };
 }
 
 async function loadCloud(uid){
@@ -348,7 +352,7 @@ function CategoryManager({categories, onUpdate, onClose}){
 }
 
 // BOOK ROW 
-function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,isSelected,onSelect,isMoveTarget,onMoveHere,showEdit,onToggleEdit,idx,onDragStart,onDragEnter,onDragEnd,isDragging,isDragOver}){
+function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isSelected,onSelect,isMoveTarget,onMoveHere,showEdit,onToggleEdit,idx,onDragStart,onDragEnter,onDragEnd,isDragging,isDragOver}){
   const b=books[bookKey]; if(!b) return null;
   const cat=categories[b.type]||{color:"#8a8070",label:b.type,icon:"📖"};
   const col=cat.color;
@@ -448,7 +452,15 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,isSelected,o
                   <div style={{fontSize:"9px",color:"#6a5a38",fontFamily:"sans-serif",marginBottom:"2px",paddingTop:"5px"}}>WORDS/PAGE</div>
                   <div style={{fontSize:"18px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{wpg}</div>
                 </div>
-                <div><label style={labelStyle}>Speed (wpm)</label><NumInput value={lWpm} min={50} max={2000} width="80px" onChange={e=>setLWpm(e.target.value)} onBlur={()=>{if(!commit("wpm",lWpm,50,2000))setLWpm(String(b.wpm));}}/></div>
+                <div>
+                  <label style={labelStyle}>Speed (wpm) <span style={{color:"#4a4030",textTransform:"none",letterSpacing:0}}>{b.wpm?"":"(using default 250)"}</span></label>
+                  <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
+                    <NumInput value={lWpm} min={0} max={2000} width="80px" placeholder="250"
+                      onChange={e=>setLWpm(e.target.value)}
+                      onBlur={()=>{ const v=parseInt(lWpm); if(!lWpm||lWpm==="0"){onUpdate(bookKey,"wpm",0);} else if(v>=50&&v<=2000){onUpdate(bookKey,"wpm",v);} else setLWpm(String(b.wpm||""));}}/>
+                    {b.wpm>0&&<button onClick={()=>{onUpdate(bookKey,"wpm",0);setLWpm("");}} style={{background:"transparent",border:"1px solid #3a2a18",color:"#6a5038",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>Clear</button>}
+                  </div>
+                </div>
               </div>
               <div>
                 <label style={labelStyle}>Pages Read — <span style={{color:col}}>{lRead} of {b.pages}</span> ({100-pct}% done, {pLeft} left)</label>
@@ -458,7 +470,7 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,isSelected,o
                 </div>
               </div>
               <div style={{fontSize:"11px",color:"#5a5038",fontFamily:"sans-serif",paddingTop:"4px",borderTop:"1px solid #1e1c14"}}>
-                Est. {Math.round(pLeft*wordsPerPage(b)/b.wpm)} min · {Math.round(pLeft*wordsPerPage(b)/b.wpm/60*10)/10}h remaining
+                Est. {Math.round(pLeft*wordsPerPage(b)/effectiveWpm(b))} min · {Math.round(pLeft*wordsPerPage(b)/effectiveWpm(b)/60*10)/10}h remaining {!b.wpm&&<span style={{color:"#5a4a30"}}>(default speed)</span>}
               </div>
             </div>
           )}
@@ -503,9 +515,10 @@ function AddBookForm({onAdd,onClose,categories,defaultType}){
   const wpg=form.pages&&form.wordCount?Math.round(parseInt(form.wordCount)/parseInt(form.pages)):null;
   const col=(categories[form.type]||{}).color||"#8a8070";
   const handleAdd=()=>{
-    if(!form.title.trim()||!form.pages||!form.wpm)return;
-    const pages=parseInt(form.pages),wpm=parseInt(form.wpm);
-    if(pages<1||wpm<50)return;
+    if(!form.title.trim()||!form.pages)return;
+    const pages=parseInt(form.pages);
+    const wpm=form.wpm?parseInt(form.wpm):0; // 0 = unset, will use 250 default in calculations
+    if(pages<1)return;
     onAdd({title:form.title.trim(),author:form.author.trim()||"Unknown",series:form.series.trim()||undefined,type:form.type,pages,wordCount:form.wordCount?parseInt(form.wordCount):pages*250,wpm,pagesRead:parseInt(form.pagesRead)||0});
     onClose();
   };
@@ -529,7 +542,7 @@ function AddBookForm({onAdd,onClose,categories,defaultType}){
         <div><label style={labelStyle}>Pages *</label><input type="number" value={form.pages} onChange={e=>set("pages",e.target.value)} placeholder="e.g. 400" style={{...textInputStyle,width:"90px"}}/></div>
         <div><label style={labelStyle}>Word Count</label><input type="number" value={form.wordCount} onChange={e=>set("wordCount",e.target.value)} placeholder="optional" style={{...textInputStyle,width:"110px"}}/></div>
         {wpg&&<div style={{padding:"6px 10px",background:"#141208",border:"1px solid #2a2218",borderRadius:"6px",textAlign:"center"}}><div style={{fontSize:"9px",color:"#6a5a38",fontFamily:"sans-serif"}}>W/PG</div><div style={{fontSize:"16px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{wpg}</div></div>}
-        <div><label style={labelStyle}>Speed (wpm)*</label><input type="number" value={form.wpm} onChange={e=>set("wpm",e.target.value)} placeholder="250" style={{...textInputStyle,width:"90px"}}/></div>
+        <div><label style={labelStyle}>Speed (wpm)</label><input type="number" value={form.wpm} onChange={e=>set("wpm",e.target.value)} placeholder="optional" style={{...textInputStyle,width:"90px"}}/></div>
         <div><label style={labelStyle}>Already Read</label><input type="number" value={form.pagesRead} onChange={e=>set("pagesRead",e.target.value)} placeholder="0" style={{...textInputStyle,width:"90px"}}/></div>
       </div>
       <button onClick={handleAdd} style={{background:col,color:"#fff",border:"none",borderRadius:"7px",padding:"9px 20px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",fontWeight:"600"}}>+ Add to List</button>
@@ -538,7 +551,8 @@ function AddBookForm({onAdd,onClose,categories,defaultType}){
 }
 
 // SLOT PANEL 
-function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReorder,onDelete,onAddNew,onUpdateMins}){
+function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReorder,onDelete,onAddNew,onUpdateMins,onShelve}){
+  const [shelveFor, setShelveFor] = useState(null);
   const [selected,  setSelected]  = useState(null);
   const [editKey,   setEditKey]   = useState(null);
   const [showAdd,   setShowAdd]   = useState(false);
@@ -601,7 +615,7 @@ function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReo
         {order.map((key,i)=>{
           const t=tl.find(x=>x.key===key);
           return <BookRow key={key} bookKey={key} books={books} tl={t} mpd={mpd} categories={categories}
-            onUpdate={onUpdate} onDelete={onDelete}
+            onUpdate={onUpdate} onDelete={onDelete} onShelve={onShelve?()=>setShelveFor(key):null}
             isSelected={selected===key} onSelect={handleSelect}
             isMoveTarget={!!selected&&selected!==key} onMoveHere={handleMoveHere}
             showEdit={editKey===key} onToggleEdit={k=>setEditKey(p=>p===k?null:k)}
@@ -808,55 +822,422 @@ function AllNotesView({books,categories}){
   );
 }
 
-// MAIN APP 
+
+// STAR RATING COMPONENT
+function StarRating({value, onChange, size}){
+  const [hover,setHover]=useState(null);
+  const sz=size||22;
+  const display=hover!==null?hover:value;
+  return (
+    <div style={{display:"flex",gap:"2px",alignItems:"center",cursor:onChange?"pointer":"default"}}>
+      {[1,2,3,4,5].map(star=>{
+        const filled=display>=star;
+        const half=display>=star-0.5&&display<star;
+        return (
+          <div key={star} style={{position:"relative",width:sz,height:sz,flexShrink:0}}
+            onMouseMove={onChange?e=>{
+              const r=e.currentTarget.getBoundingClientRect();
+              const x=e.clientX-r.left;
+              setHover(x<r.width/2?star-0.5:star);
+            }:undefined}
+            onMouseLeave={onChange?()=>setHover(null):undefined}
+            onClick={onChange?()=>onChange(hover):undefined}>
+            <svg width={sz} height={sz} viewBox="0 0 24 24">
+              <defs>
+                <linearGradient id={"g"+star}>
+                  <stop offset={filled?"100%":half?"50%":"0%"} stopColor="#c9a84c"/>
+                  <stop offset={filled?"100%":half?"50%":"0%"} stopColor="#2a2318"/>
+                </linearGradient>
+              </defs>
+              <path fill={filled?"#c9a84c":half?"url(#g"+star+")":"#2a2318"}
+                stroke="#5a4a20" strokeWidth="1.5"
+                d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+            </svg>
+          </div>
+        );
+      })}
+      {value>0&&<span style={{fontSize:"12px",color:"#8a7a50",fontFamily:"sans-serif",marginLeft:"4px"}}>{value.toFixed(1)}</span>}
+    </div>
+  );
+}
+
+// SHELVE MODAL -- shown when user marks a book finished/dropped
+function ShelveModal({book, bookKey, categories, onConfirm, onClose}){
+  const [status,setStatus]=useState("finished");
+  const [rating,setRating]=useState(0);
+  const [review,setReview]=useState("");
+  const cat=categories[book.type]||{color:"#8a8070",label:book.type};
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",zIndex:1001,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px"}}>
+      <div style={{background:"#141208",border:`1px solid ${cat.color}50`,borderRadius:"14px",padding:"24px",width:"100%",maxWidth:"440px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"18px"}}>
+          <div style={{fontSize:"15px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>{book.title}</div>
+          <button onClick={onClose} style={{background:"transparent",border:"none",color:"#5a5038",cursor:"pointer",fontSize:"20px"}}>✕</button>
+        </div>
+
+        <div style={{marginBottom:"16px"}}>
+          <label style={labelStyle}>Status</label>
+          <div style={{display:"flex",gap:"8px"}}>
+            {[["finished","✓ Finished"],["dropped","✕ Dropped"]].map(([val,lbl])=>(
+              <button key={val} onClick={()=>setStatus(val)} style={{
+                flex:1,background:status===val?(val==="finished"?"#1a3a2a":"#3a1a18"):"#111008",
+                border:`1px solid ${status===val?(val==="finished"?"#3a7a5a":"#7a3a3a"):"#2a2318"}`,
+                color:status===val?(val==="finished"?"#7aaa8a":"#aa7a7a"):"#5a5038",
+                borderRadius:"7px",padding:"8px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",
+              }}>{lbl}</button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{marginBottom:"16px"}}>
+          <label style={labelStyle}>Rating</label>
+          <StarRating value={rating} onChange={setRating} size={28}/>
+          {rating===0&&<div style={{fontSize:"11px",color:"#4a4030",fontFamily:"sans-serif",marginTop:"4px"}}>Hover to rate</div>}
+        </div>
+
+        <div style={{marginBottom:"20px"}}>
+          <label style={labelStyle}>Review / Thoughts (optional)</label>
+          <textarea value={review} onChange={e=>setReview(e.target.value)}
+            placeholder="What did you think? Would you recommend it?"
+            rows={4} style={{...textInputStyle,resize:"vertical",lineHeight:"1.6",fontFamily:"Georgia,serif"}}/>
+        </div>
+
+        <div style={{display:"flex",gap:"8px",justifyContent:"flex-end"}}>
+          <button onClick={onClose} style={{background:"transparent",border:"1px solid #3a3020",color:"#6a5a38",borderRadius:"7px",padding:"8px 18px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif"}}>Cancel</button>
+          <button onClick={()=>onConfirm(bookKey,status,rating,review)} style={{
+            background:status==="finished"?"#2a4a3a":"#3a2018",
+            border:`1px solid ${status==="finished"?"#4a7a5a":"#7a4a30"}`,
+            color:status==="finished"?"#8aaa8a":"#aa8a6a",
+            borderRadius:"7px",padding:"8px 20px",cursor:"pointer",fontSize:"13px",fontFamily:"sans-serif",fontWeight:"600",
+          }}>{status==="finished"?"Mark Finished":"Mark Dropped"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// SHELF VIEW -- all finished/dropped books
+function ShelfView({books, shelf, categories, onUpdate, onUnshelf}){
+  const [filter,setFilter]=useState("all"); // all | finished | dropped
+  const [sort,setSort]=useState("date"); // date | rating | title
+  const [editKey,setEditKey]=useState(null);
+
+  const entries=Object.entries(shelf).filter(([k])=>books[k]).map(([k,s])=>({
+    key:k, book:books[k], ...s
+  }));
+  const filtered=entries.filter(e=>filter==="all"||e.status===filter);
+  const sorted=[...filtered].sort((a,b)=>{
+    if(sort==="rating") return (b.rating||0)-(a.rating||0);
+    if(sort==="title") return a.book.title.localeCompare(b.book.title);
+    return (b.date||"").localeCompare(a.date||""); // newest first
+  });
+
+  const avgRating = filtered.filter(e=>e.rating>0).length
+    ? (filtered.filter(e=>e.rating>0).reduce((s,e)=>s+e.rating,0)/filtered.filter(e=>e.rating>0).length).toFixed(1)
+    : null;
+
+  return (
+    <div>
+      {/* Controls */}
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"14px 16px",marginBottom:"14px",display:"flex",gap:"10px",flexWrap:"wrap",alignItems:"center"}}>
+        <div style={{display:"flex",gap:"5px"}}>
+          {[["all","All"],["finished","Finished"],["dropped","Dropped"]].map(([val,lbl])=>(
+            <button key={val} onClick={()=>setFilter(val)} style={{background:filter===val?"#2a2010":"transparent",border:`1px solid ${filter===val?"#6a5028":"#2e2818"}`,color:filter===val?"#d4b870":"#6a5a38",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>{lbl}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:"5px",marginLeft:"auto"}}>
+          <span style={{fontSize:"11px",color:"#4a4030",fontFamily:"sans-serif",alignSelf:"center"}}>Sort:</span>
+          {[["date","Recent"],["rating","Rating"],["title","Title"]].map(([val,lbl])=>(
+            <button key={val} onClick={()=>setSort(val)} style={{background:sort===val?"#1a1a2a":"transparent",border:`1px solid ${sort===val?"#3a3a6a":"#2e2818"}`,color:sort===val?"#8a8aaa":"#6a5a38",borderRadius:"6px",padding:"5px 10px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>{lbl}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stats */}
+      {entries.length>0&&(
+        <div style={{display:"flex",gap:"8px",flexWrap:"wrap",marginBottom:"14px"}}>
+          {[
+            [entries.filter(e=>e.status==="finished").length+" finished","#3a7a5a"],
+            [entries.filter(e=>e.status==="dropped").length+" dropped","#7a3a3a"],
+            ...(avgRating?[[avgRating+" avg rating","#7a6a30"]]:[]),
+          ].map(([val,col])=>(
+            <div key={val} style={{background:"#111008",border:`1px solid ${col}50`,borderRadius:"8px",padding:"6px 14px",fontSize:"13px",color:col,fontFamily:"sans-serif"}}>{val}</div>
+          ))}
+        </div>
+      )}
+
+      {sorted.length===0?(
+        <div style={{textAlign:"center",padding:"60px 20px",color:"#4a4030",fontFamily:"sans-serif",fontStyle:"italic"}}>
+          {entries.length===0?"No books on your shelf yet. Mark a book as finished or dropped from the Books tab.":"No books match this filter."}
+        </div>
+      ):(
+        <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+          {sorted.map(({key,book,status,rating,review,date})=>{
+            const cat=categories[book.type]||{color:"#8a8070",label:book.type};
+            const isEdit=editKey===key;
+            return (
+              <div key={key} style={{background:"#111008",border:`1px solid ${cat.color}28`,borderLeft:`3px solid ${status==="finished"?"#4a8a5a":"#8a4a3a"}`,borderRadius:"10px",overflow:"hidden"}}>
+                <div style={{padding:"14px 16px"}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:"10px"}}>
+                    <div style={{flex:1}}>
+                      <div style={{display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap",marginBottom:"4px"}}>
+                        <span style={{fontSize:"11px",background:status==="finished"?"#1a3a2a":"#3a1a18",color:status==="finished"?"#6a9a7a":"#9a6a6a",border:`1px solid ${status==="finished"?"#2a5a3a":"#5a2a2a"}`,padding:"2px 8px",borderRadius:"8px",fontFamily:"sans-serif"}}>{status==="finished"?"✓ Finished":"✕ Dropped"}</span>
+                        <Pill color={cat.color}>{cat.label}</Pill>
+                        {date&&<span style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif"}}>{fmtDateStr(date)}</span>}
+                      </div>
+                      <div style={{fontSize:"15px",color:"#f0e4cc",fontFamily:"Georgia,serif",marginBottom:"3px"}}>{book.title}</div>
+                      <div style={{fontSize:"12px",color:"#6a5840",fontStyle:"italic",marginBottom:"8px"}}>{book.author}{book.series?` · ${book.series}`:""}</div>
+                      <StarRating value={rating||0} onChange={isEdit?v=>onUpdate(key,"rating",v):null} size={18}/>
+                    </div>
+                    <div style={{display:"flex",gap:"6px",flexShrink:0}}>
+                      <button onClick={()=>setEditKey(isEdit?null:key)} style={{background:isEdit?"#2a2010":"transparent",border:`1px solid ${isEdit?"#6a5028":"#3a3020"}`,color:isEdit?"#c9a84c":"#5a5040",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>✎</button>
+                      <button onClick={()=>onUnshelf(key)} title="Move back to reading list" style={{background:"transparent",border:"1px solid #2a3a2a",color:"#5a7a5a",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px"}}>↩</button>
+                    </div>
+                  </div>
+
+                  {/* Review display / edit */}
+                  {isEdit?(
+                    <div style={{marginTop:"12px"}}>
+                      <label style={labelStyle}>Review</label>
+                      <textarea defaultValue={review||""} onBlur={e=>onUpdate(key,"review",e.target.value)}
+                        rows={3} placeholder="Your thoughts..."
+                        style={{...textInputStyle,resize:"vertical",lineHeight:"1.6",fontFamily:"Georgia,serif",marginTop:"4px"}}/>
+                      <div style={{display:"flex",gap:"8px",marginTop:"8px"}}>
+                        {[["finished","✓ Finished"],["dropped","✕ Dropped"]].map(([val,lbl])=>(
+                          <button key={val} onClick={()=>onUpdate(key,"status",val)} style={{background:status===val?(val==="finished"?"#1a3a2a":"#3a1a18"):"transparent",border:`1px solid ${status===val?(val==="finished"?"#3a7a5a":"#7a3a3a"):"#2a2318"}`,color:status===val?(val==="finished"?"#7aaa8a":"#aa7a7a"):"#5a5038",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>{lbl}</button>
+                        ))}
+                      </div>
+                    </div>
+                  ):(
+                    review&&<p style={{margin:"10px 0 0",fontSize:"13px",color:"#a09070",lineHeight:"1.7",fontFamily:"Georgia,serif",whiteSpace:"pre-wrap",borderTop:"1px solid #1e1c14",paddingTop:"10px"}}>{review}</p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// SEQUENTIAL PANEL -- unified reading queue across all categories
+function SequentialPanel({cats,books,shelf,order,seqOrder,timelines,mpd,categories,onReorder,onAdd,onShelve,onUpdate,onDelete,onUpdateMins}){
+  const [showShelveFor,setShowShelveFor]=useState(null);
+  const [dragKey,setDragKey]=useState(null);
+  const [dragOver,setDragOver]=useState(null);
+  const [selected,setSelected]=useState(null);
+  const [editKey,setEditKey]=useState(null);
+
+  // All active books not yet shelved
+  const allActive=Object.keys(books).filter(k=>!shelf[k]);
+  // Books in the seq queue (already ordered)
+  const inQueue=seqOrder.filter(k=>allActive.includes(k));
+  // Books not yet in queue
+  const notInQueue=allActive.filter(k=>!seqOrder.includes(k));
+
+  // Average mpd across all cats for timeline display
+  const catKeys=Object.keys(cats);
+  const avgMpd=catKeys.length?Math.round(catKeys.reduce((s,k)=>s+(mpd[k]||20),0)/catKeys.length):20;
+  const seqTl=(timelines._seq||[]);
+
+  const handleDragEnd=()=>{
+    if(dragKey&&dragOver&&dragKey!==dragOver){
+      const arr=[...inQueue],from=arr.indexOf(dragKey),to=arr.indexOf(dragOver);
+      if(from>=0&&to>=0){arr.splice(from,1);arr.splice(to,0,dragKey);onReorder(arr);}
+    }
+    setDragKey(null);setDragOver(null);
+  };
+  const handleSelect=(k)=>{ if(selected===k){setSelected(null);return;} setSelected(k); };
+  const handleMoveHere=(targetKey)=>{
+    if(!selected||selected===targetKey){setSelected(null);return;}
+    const arr=[...inQueue],from=arr.indexOf(selected),to=arr.indexOf(targetKey);
+    if(from>=0&&to>=0){arr.splice(from,1);arr.splice(to,0,selected);onReorder(arr);}
+    setSelected(null);
+  };
+  const moveUp=(k)=>{ const a=[...inQueue],i=a.indexOf(k); if(i>0){[a[i-1],a[i]]=[a[i],a[i-1]];onReorder(a);} };
+  const moveDown=(k)=>{ const a=[...inQueue],i=a.indexOf(k); if(i<a.length-1){[a[i],a[i+1]]=[a[i+1],a[i]];onReorder(a);} };
+
+  return (
+    <div>
+      {showShelveFor&&books[showShelveFor]&&(
+        <ShelveModal book={books[showShelveFor]} bookKey={showShelveFor} categories={categories}
+          onConfirm={(k,s,r,rv)=>{ onShelve(k,s,r,rv); setShowShelveFor(null); }}
+          onClose={()=>setShowShelveFor(null)}/>
+      )}
+
+      {/* Reading queue */}
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",overflow:"hidden",marginBottom:"14px"}}>
+        <div style={{background:"linear-gradient(90deg,#3a5a3a18 0%,transparent 60%)",borderBottom:"1px solid #2a2318",padding:"12px 16px",display:"flex",alignItems:"center",gap:"10px"}}>
+          <span style={{fontSize:"20px"}}>≡</span>
+          <div style={{flex:1}}>
+            <div style={{fontSize:"13px",color:"#7aaa7a",letterSpacing:"1.5px",textTransform:"uppercase",fontFamily:"sans-serif"}}>Reading Queue</div>
+            <div style={{fontSize:"11px",color:"#4a4030",fontFamily:"sans-serif",marginTop:"1px"}}>
+              {selected?"tap a row to place selected book here":"drag or tap ⠿ to reorder"} · {inQueue.length} books
+            </div>
+          </div>
+          <div style={{fontSize:"11px",color:"#6a5a38",fontFamily:"sans-serif"}}>
+            Avg {avgMpd}min/day
+          </div>
+        </div>
+
+        {selected&&(
+          <div style={{background:"#3a5a3a18",borderBottom:"1px solid #3a5a3a30",padding:"8px 14px",display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
+            <span style={{fontSize:"12px",color:"#7aaa7a",fontFamily:"sans-serif",flex:1}}>Moving: <b>{books[selected]&&books[selected].title}</b></span>
+            <button onClick={()=>moveUp(selected)} style={{background:"transparent",border:"1px solid #3a6a3a",color:"#6a9a6a",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↑</button>
+            <button onClick={()=>moveDown(selected)} style={{background:"transparent",border:"1px solid #3a6a3a",color:"#6a9a6a",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"14px"}}>↓</button>
+            <button onClick={()=>setSelected(null)} style={{background:"transparent",border:"1px solid #4a3020",color:"#7a5040",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>Cancel</button>
+          </div>
+        )}
+
+        <div style={{padding:"12px"}}>
+          {inQueue.length===0&&(
+            <div style={{textAlign:"center",padding:"20px",color:"#4a4030",fontFamily:"sans-serif",fontSize:"13px",fontStyle:"italic"}}>Queue is empty. Add books from below.</div>
+          )}
+          {inQueue.map((key,i)=>{
+            const b=books[key]; if(!b)return null;
+            const cat=categories[b.type]||{color:"#8a8070"};
+            const col=cat.color;
+            const t=seqTl.find(x=>x.key===key);
+            const isDrag=dragKey===key,isOver=dragOver===key,isSel=selected===key,isTarget=!!selected&&selected!==key;
+            return (
+              <div key={key}
+                draggable onDragStart={()=>setDragKey(key)} onDragEnter={e=>{e.preventDefault();if(key!==dragKey)setDragOver(key);}} onDragOver={e=>e.preventDefault()} onDragEnd={handleDragEnd}
+                style={{background:isSel?col+"28":isOver?col+"18":"#0d0c0a",border:`1px solid ${isSel?col+"cc":isOver?col+"70":col+"28"}`,borderLeft:`3px solid ${isSel?col:col+"88"}`,borderRadius:"7px",marginBottom:"5px",opacity:isDrag?0.4:1,transition:"all 0.12s",cursor:"grab"}}>
+                <div style={{display:"flex",alignItems:"center",padding:"9px 12px",gap:"8px"}}>
+                  <span style={{fontSize:"12px",color:"#3a3028",fontFamily:"sans-serif",minWidth:"20px",flexShrink:0}}>{i+1}.</span>
+                  <button onClick={()=>isSel?handleMoveHere(key):handleSelect(key)} style={{background:isSel?col+"40":isTarget?col+"18":"transparent",border:`1px solid ${isSel?col+"80":"#2a2018"}`,color:isSel?col:isTarget?col+"99":"#3a3028",borderRadius:"5px",padding:"4px 6px",cursor:"grab",fontSize:"14px",flexShrink:0,lineHeight:1}}>{isSel?"↕":"⠿"}</button>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
+                      {i===0&&<Pill color="#5a8a5a">Up next</Pill>}
+                      <span style={{fontSize:"14px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>{b.title}</span>
+                      <Pill color={col}>{cat.label}</Pill>
+                    </div>
+                    <div style={{fontSize:"11px",color:"#6a5840"}}>{b.author}</div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
+                    {t&&<div style={{textAlign:"right"}}>
+                      <div style={{fontSize:"12px",color:"#7a9a7a",fontFamily:"sans-serif",fontWeight:700}}>~{t.days}d</div>
+                      <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>{fmtShort(t.startDate)}→{fmtShort(t.endDate)}</div>
+                    </div>}
+                    <button onClick={()=>setShowShelveFor(key)} title="Mark finished/dropped" style={{background:"transparent",border:"1px solid #3a4a3a",color:"#5a7a5a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"12px"}}>✓</button>
+                    <button onClick={()=>{ const a=inQueue.filter(k=>k!==key); onReorder(a); }} title="Remove from queue" style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}}>✕</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Daily time per category */}
+      <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",padding:"14px 16px",marginBottom:"14px"}}>
+        <div style={{fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif",marginBottom:"12px"}}>Daily Reading Time</div>
+        <div style={{display:"flex",gap:"12px",flexWrap:"wrap"}}>
+          {Object.entries(cats).map(([k,cat])=>(
+            <div key={k} style={{display:"flex",alignItems:"center",gap:"8px",flex:1,minWidth:"140px"}}>
+              <span style={{fontSize:"13px"}}>{cat.icon}</span>
+              <span style={{fontSize:"11px",color:cat.color,fontFamily:"sans-serif",minWidth:"60px"}}>{cat.label}</span>
+              <input type="range" min={5} max={120} step={5} value={mpd[k]||20} onChange={e=>onUpdateMins(k,parseInt(e.target.value))} style={{flex:1,accentColor:cat.color}}/>
+              <span style={{fontSize:"12px",color:cat.color,fontFamily:"sans-serif",minWidth:"30px"}}>{mpd[k]||20}m</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Books not in queue */}
+      {notInQueue.length>0&&(
+        <div style={{background:"#111008",border:"1px solid #2a2318",borderRadius:"12px",overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",borderBottom:"1px solid #2a2318",fontSize:"11px",color:"#6a5a38",letterSpacing:"2px",textTransform:"uppercase",fontFamily:"sans-serif"}}>
+            Not In Queue ({notInQueue.length})
+          </div>
+          <div style={{padding:"10px"}}>
+            {notInQueue.map(key=>{
+              const b=books[key]; if(!b) return null;
+              const cat=categories[b.type]||{color:"#8a8070"};
+              return (
+                <div key={key} style={{display:"flex",alignItems:"center",gap:"10px",padding:"8px 10px",background:"#0d0c0a",border:`1px solid ${cat.color}20`,borderRadius:"6px",marginBottom:"5px"}}>
+                  <div style={{flex:1}}>
+                    <span style={{fontSize:"13px",color:"#9a8a68"}}>{b.title}</span>
+                    <span style={{fontSize:"11px",color:"#5a5038",fontFamily:"sans-serif",marginLeft:"8px",fontStyle:"italic"}}>{b.author}</span>
+                  </div>
+                  <Pill color={cat.color}>{cat.label}</Pill>
+                  <button onClick={()=>onAdd(key)} style={{background:"#1a2a1a",border:"1px solid #3a5a3a",color:"#6a9a6a",borderRadius:"5px",padding:"4px 10px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>+ Add</button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// MAIN APP
 function App(){
-  const [user,    setUser]    = useState(undefined); // undefined=loading, null=signed out
+  const [user,    setUser]    = useState(undefined);
   const [books,   setBooks]   = useState({});
   const [order,   setOrder]   = useState({});
-  const [mpd,     setMpd]     = useState({});  // minsPerDay per category
+  const [mpd,     setMpd]     = useState({});
   const [log,     setLog]     = useState([]);
   const [cats,    setCats]    = useState(INIT_CATEGORIES);
+  const [shelf,   setShelf]   = useState({}); // finished/dropped books with ratings
+  const [readMode,setReadMode]= useState("parallel"); // "parallel" | "sequential"
+  const [seqOrder,setSeqOrder]= useState([]); // unified book order for sequential mode
   const [view,    setView]    = useState("list");
   const [toast,   setToast]   = useState(false);
   const [sync,    setSync]    = useState("loading");
   const [showCatMgr, setShowCatMgr] = useState(false);
-  const saveTimer = useRef(null);
+  const saveTimer   = useRef(null);
+  const cloudLoaded = useRef(false); // don't write to cloud until we've read it first
 
   // Auth listener 
   useEffect(()=>{
     return window.auth.onAuthStateChanged(u=>setUser(u||null));
   },[]);
 
-  // Load data when user signs in 
+  // Load data when user signs in
   useEffect(()=>{
     if(!user) return;
+    cloudLoaded.current = false;
     setSync("loading");
-    const local=loadLocal(user.uid);
-    if(local){ applyState(local); }
+    const local = loadLocal(user.uid);
+    if(local){ applyState(sanitizeState(local)); }
     loadCloud(user.uid).then(cloud=>{
-      if(cloud&&cloud.books){ applyState(cloud); saveLocal(user.uid,cloud); }
+      if(cloud && cloud.books){
+        applyState(sanitizeState(cloud));
+        saveLocal(user.uid, cloud);
+      }
+      cloudLoaded.current = true;
       setSync("synced");
-    }).catch(()=>setSync("offline"));
+    }).catch(()=>{
+      cloudLoaded.current = true; // allow saves even if cloud load fails
+      setSync("offline");
+    });
   },[user]);
 
   const applyState=(s)=>{
-    if(s.books)   setBooks(s.books);
-    if(s.order)   setOrder(s.order);
+    if(s.books)      setBooks(s.books);
+    if(s.order)      setOrder(s.order);
     if(s.minsPerDay) setMpd(s.minsPerDay);
-    if(s.log)     setLog(s.log);
+    if(s.log)        setLog(s.log);
     if(s.categories) setCats(s.categories);
+    if(s.shelf)      setShelf(s.shelf);
+    if(s.readMode)   setReadMode(s.readMode);
+    if(s.seqOrder)   setSeqOrder(s.seqOrder);
   };
 
-  // Auto-save 
+  // Auto-save -- only writes to cloud after initial cloud load completes
   useEffect(()=>{
     if(!user) return;
-    const state={books,order,minsPerDay:mpd,log,categories:cats};
-    saveLocal(user.uid,state);
+    const state={books,order,minsPerDay:mpd,log,categories:cats,shelf,readMode,seqOrder};
+    saveLocal(user.uid, state);
+    if(!cloudLoaded.current) return; // don't overwrite cloud before we've read it
     setSync("saving");
     clearTimeout(saveTimer.current);
-    saveTimer.current=setTimeout(()=>{ saveCloud(user.uid,state); setSync("synced"); },1500);
+    saveTimer.current = setTimeout(()=>{ saveCloud(user.uid, state); setSync("synced"); }, 1500);
     return ()=>clearTimeout(saveTimer.current);
-  },[books,order,mpd,log,cats]);
+  },[books,order,mpd,log,cats,shelf,readMode,seqOrder]);
 
   const showToast=(msg)=>{ setToast(msg||"✓ Saved"); setTimeout(()=>setToast(false),2500); };
 
@@ -891,6 +1272,32 @@ function App(){
   },[]);
   const updateMins=useCallback((type,val)=>{ setMpd(p=>({...p,[type]:val})); },[]);
 
+  // Move book to shelf (finished or dropped)
+  const shelveBook=useCallback((key,status,rating,review)=>{
+    setShelf(p=>({...p,[key]:{status,rating:rating||0,review:review||"",date:todayStr()}}));
+    // Remove from active order
+    setOrder(p=>{ const n={...p}; Object.keys(n).forEach(t=>{n[t]=n[t].filter(k=>k!==key);}); return n; });
+    setSeqOrder(p=>p.filter(k=>k!==key));
+  },[]);
+
+  // Restore book from shelf back to active reading
+  const unshelfBook=useCallback((key)=>{
+    const b=books[key]; if(!b) return;
+    setShelf(p=>{ const n={...p}; delete n[key]; return n; });
+    // Add back to its category order
+    setOrder(p=>({...p,[b.type]:[...(p[b.type]||[]),key]}));
+  },[books]);
+
+  const updateShelf=useCallback((key,field,val)=>{
+    setShelf(p=>({...p,[key]:{...p[key],[field]:val}}));
+  },[]);
+
+  // Sequential order handlers
+  const reorderSeq=useCallback((arr)=>setSeqOrder(arr),[]);
+  const addToSeq=useCallback((key)=>{
+    setSeqOrder(p=>p.includes(key)?p:[...p,key]);
+  },[]);
+
   const addLogEntries=useCallback((entries)=>{
     const newEntries=entries.map(e=>({...e,id:genKey()}));
     newEntries.forEach(e=>{
@@ -917,7 +1324,7 @@ function App(){
   },[]);
 
   const handleExport=()=>{
-    const state={books,order,minsPerDay:mpd,log,categories:cats};
+    const state={books,order,minsPerDay:mpd,log,categories:cats,shelf,readMode,seqOrder};
     const blob=new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
     const url=URL.createObjectURL(blob);
     const a=document.createElement("a"); a.href=url; a.download=`reading-backup-${todayStr()}.json`; a.click();
@@ -941,16 +1348,27 @@ function App(){
     input.click();
   };
 
-  // Build timelines 
+  // Build timelines
+  const activeBooks = Object.keys(books).filter(k=>!shelf[k]);
   const timelines={};
-  Object.keys(cats).forEach(k=>{ timelines[k]=buildTimeline(order[k]||[],books,mpd[k]||20); });
+  if(readMode==="sequential") {
+    // One unified timeline - each book uses its own wpm but shares a single slot
+    const avgMpd = Object.values(mpd).length ? Math.round(Object.values(mpd).reduce((s,v)=>s+v,0)/Object.values(mpd).length) : 20;
+    const seqTimeline = buildTimeline(seqOrder.filter(k=>activeBooks.includes(k)), books, avgMpd);
+    // Put results under each cat key so existing views still work
+    Object.keys(cats).forEach(k=>{ timelines[k]=[]; });
+    seqTimeline.forEach(t=>{ const b=books[t.key]; if(b) timelines[b.type]=[...(timelines[b.type]||[]),t]; });
+    timelines._seq = seqTimeline;
+  } else {
+    Object.keys(cats).forEach(k=>{ timelines[k]=buildTimeline((order[k]||[]).filter(k=>activeBooks.includes(k)),books,mpd[k]||20); });
+  }
 
   const allEnds=Object.values(timelines).flat().map(t=>t.endDate);
   const lastDate=allEnds.length?allEnds.reduce((m,d)=>d>m?d:m,START_DATE):START_DATE;
   const totalDays=Math.ceil((lastDate-START_DATE)/86400000);
-  const totalHrs=Math.round(Object.values(books).reduce((s,b)=>s+calcPagesLeft(b)*wordsPerPage(b)/b.wpm/60,0));
+  const totalHrs=Math.round(activeBooks.reduce((s,k)=>{ const b=books[k]; return s+calcPagesLeft(b)*wordsPerPage(b)/b.wpm/60; },0));
   const totalBooks=Object.keys(books).length;
-  const doneBooks=Object.values(books).filter(b=>calcPagesLeft(b)===0).length;
+  const shelfCount=Object.keys(shelf).length;
 
   // Auth loading 
   if(user===undefined) return <div style={{minHeight:"100vh",background:"#0d0c0a",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{color:"#6a5a38",fontFamily:"sans-serif"}}>Loading…</div></div>;
@@ -958,6 +1376,9 @@ function App(){
 
   let dataSizeKb = 0;
   try{ dataSizeKb=Math.round(new Blob([JSON.stringify({books,order,minsPerDay:mpd,log,categories:cats})]).size/1024); }catch(e){}
+
+  let dataSizeKb=0;
+  try{ dataSizeKb=Math.round(new Blob([JSON.stringify({books,order,minsPerDay:mpd,log,categories:cats,shelf,seqOrder})]).size/1024); }catch(e){}
 
   const NavBtn=({id,label})=>(
     <button onClick={()=>setView(id)} style={{background:view===id?"#221e10":"transparent",border:`1px solid ${view===id?"#6a5028":"#2e2818"}`,color:view===id?"#d4b870":"#6a5a38",borderRadius:"7px",padding:"7px 14px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",transition:"all 0.15s",whiteSpace:"nowrap"}}>{label}</button>
@@ -974,7 +1395,7 @@ function App(){
           <span style={{fontSize:"8px"}}>{sync==="synced"?"":sync==="offline"?"":""}</span>
           {sync==="synced"?"Synced":sync==="saving"?"Saving…":sync==="offline"?"Offline":"Connecting…"}
         </div>
-        {(()=>{ try{ const kb=Math.round(new Blob([JSON.stringify({books,order,minsPerDay:mpd,log,categories:cats})]).size/1024); if(kb>100) return <div style={{background:"#2a1a08",border:"1px solid #7a4a20",color:"#aa7a4a",borderRadius:"8px",padding:"6px 12px",fontSize:"10px",fontFamily:"sans-serif"}} title="Your reading list is getting large">{kb}KB / 150KB</div>; }catch(e){} return null; })()}
+        {dataSizeKb>100&&<div style={{background:"#2a1a08",border:"1px solid #7a4a20",color:"#aa7a4a",borderRadius:"8px",padding:"6px 12px",fontSize:"10px",fontFamily:"sans-serif"}} title="Your reading list is getting large">{dataSizeKb}KB / 150KB</div>}
         {toast&&<div style={{background:"#2a2a1a",border:"1px solid #5a5a2a",color:"#aaaa7a",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",fontFamily:"sans-serif"}}>{toast}</div>}
       </div>
 
@@ -989,7 +1410,7 @@ function App(){
           </div>
           <h1 style={{fontSize:"clamp(22px,6vw,40px)",fontWeight:"normal",margin:"0 0 6px",color:"#f0e4cc",letterSpacing:"-0.5px"}}>Reading Schedule</h1>
           <div style={{display:"flex",justifyContent:"center",gap:"6px",flexWrap:"wrap",marginBottom:"14px"}}>
-            {[["~"+totalHrs+"h","hours left"],["~"+Math.round(totalDays/7)+"wks","to finish"],[fmtDate(lastDate),"final date"],[doneBooks+"/"+totalBooks,"done"]].map(([v,l])=>(
+            {[["~"+totalHrs+"h","hours left"],["~"+Math.round(totalDays/7)+"wks","to finish"],[fmtDate(lastDate),"final date"],[shelfCount+"/"+totalBooks,"shelved"]].map(([v,l])=>(
               <div key={l} style={{background:"#181510",border:"1px solid #2a2218",borderRadius:"8px",padding:"6px 12px",minWidth:"75px"}}>
                 <div style={{fontSize:"13px",color:"#c9a84c",fontFamily:"sans-serif",fontWeight:"bold"}}>{v}</div>
                 <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif"}}>{l}</div>
@@ -998,6 +1419,7 @@ function App(){
           </div>
           <div style={{display:"flex",justifyContent:"center",gap:"5px",flexWrap:"wrap",marginBottom:"10px"}}>
             <NavBtn id="list"     label="📚 Books"/>
+            <NavBtn id="shelf"    label="⭐ Shelf"/>
             <NavBtn id="timeline" label="📅 Timeline"/>
             <NavBtn id="table"    label="🗓 Dates"/>
             <NavBtn id="progress" label="✏️ Log"/>
@@ -1005,6 +1427,9 @@ function App(){
           </div>
           <div style={{display:"flex",justifyContent:"center",gap:"6px",flexWrap:"wrap"}}>
             <button onClick={()=>setShowCatMgr(true)} style={{background:"transparent",border:"1px solid #4a3a5a",color:"#8a7aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⚙ Categories</button>
+            <button onClick={()=>{ setReadMode(m=>m==="parallel"?"sequential":"parallel"); }} style={{background:"transparent",border:`1px solid ${readMode==="sequential"?"#5a8a5a":"#3a4a3a"}`,color:readMode==="sequential"?"#7aaa7a":"#5a7a5a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}} title={readMode==="parallel"?"Switch to one book at a time":"Switch to parallel reading"}>
+              {readMode==="sequential"?"≡ Sequential":"⫶ Parallel"}
+            </button>
             <button onClick={handleExport} style={{background:"transparent",border:"1px solid #3a7a5a",color:"#5aaa7a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬇ Export</button>
             <button onClick={handleImport} style={{background:"transparent",border:"1px solid #3a4a7a",color:"#6a7aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬆ Import</button>
             <button onClick={()=>window.auth.signOut()} style={{background:"transparent",border:"1px solid #4a2a2a",color:"#8a5a5a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>Sign out</button>
@@ -1030,21 +1455,31 @@ function App(){
                 </div>
               </div>
             )}
-            <div style={{fontSize:"12px",color:"#5a5038",fontFamily:"sans-serif",marginBottom:"12px",textAlign:"center",fontStyle:"italic"}}>
-              Drag or tap ⠿ to reorder · ✎ to edit · min/day slider on each category header
-            </div>
-            {Object.entries(cats).map(([catKey,cat])=>(
-              <SlotPanel key={catKey} catKey={catKey} category={cat} order={order[catKey]||[]} books={books}
-                tl={timelines[catKey]||[]} mpd={mpd[catKey]||20} categories={cats}
-                onUpdate={updateBook} onReorder={reorder} onDelete={deleteBook}
-                onAddNew={addBook} onUpdateMins={updateMins}/>
-            ))}
+            {readMode==="sequential" && (
+              <SequentialPanel
+                cats={cats} books={books} shelf={shelf} order={order} seqOrder={seqOrder}
+                timelines={timelines} mpd={mpd} categories={cats}
+                onReorder={reorderSeq} onAdd={addToSeq} onShelve={shelveBook}
+                onUpdate={updateBook} onDelete={deleteBook} onUpdateMins={updateMins}/>
+            )}
+            {readMode==="parallel" && (<>
+              <div style={{fontSize:"12px",color:"#5a5038",fontFamily:"sans-serif",marginBottom:"12px",textAlign:"center",fontStyle:"italic"}}>
+                Drag or tap ⠿ to reorder · ✎ to edit · min/day slider on each category header
+              </div>
+              {Object.entries(cats).map(([catKey,cat])=>(
+                <SlotPanel key={catKey} catKey={catKey} category={cat} order={(order[catKey]||[]).filter(k=>!shelf[k])} books={books}
+                  tl={timelines[catKey]||[]} mpd={mpd[catKey]||20} categories={cats}
+                  onUpdate={updateBook} onReorder={reorder} onDelete={deleteBook}
+                  onAddNew={addBook} onUpdateMins={updateMins} onShelve={shelveBook}/>
+              ))}
+            </>)}
           </>
         )}
         {view==="timeline"&&<TimelineView timelines={timelines} books={books} categories={cats}/>}
         {view==="table"   &&<TableView    timelines={timelines} books={books} categories={cats}/>}
         {view==="progress"&&<ProgressLog  books={books} order={order} categories={cats} log={log} onAddEntry={addLogEntries} onDeleteEntry={deleteLogEntry}/>}
         {view==="notes"   &&<AllNotesView books={books} categories={cats}/>}
+        {view==="shelf"   &&<ShelfView books={books} shelf={shelf} categories={cats} onUpdate={updateShelf} onUnshelf={unshelfBook}/>}
       </div>
     </div>
   );
