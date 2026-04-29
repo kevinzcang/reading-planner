@@ -1196,62 +1196,85 @@ function App(){
     return window.auth.onAuthStateChanged(u=>setUser(u||null));
   },[]);
 
-  // Load data when user signs in
+  // Load data when user changes -- always reset state first to prevent account bleed
   useEffect(()=>{
-    if(!user) return;
+    if(!user) {
+      // Signed out: wipe everything so next user starts clean
+      setBooks({}); setOrder({}); setMpd({}); setLog([]);
+      setCats(INIT_CATEGORIES); setShelf({}); setReadMode("parallel"); setSeqOrder([]);
+      cloudLoaded.current = false;
+      return;
+    }
+    // Reset to blank slate before loading this user's data
     cloudLoaded.current = false;
+    setBooks({}); setOrder({}); setMpd({}); setLog([]);
+    setCats(INIT_CATEGORIES); setShelf({}); setReadMode("parallel"); setSeqOrder([]);
     setSync("loading");
+
+    // Load localStorage first for instant display
     const local = loadLocal(user.uid);
     if(local){ applyState(sanitizeState(local)); }
+
+    // Then load cloud and overwrite (cloud is authoritative)
     loadCloud(user.uid).then(cloud=>{
-      if(cloud && cloud.books){
+      if(cloud && cloud.books && Object.keys(cloud.books).length > 0){
         applyState(sanitizeState(cloud));
-        saveLocal(user.uid, cloud);
+        saveLocal(user.uid, cloud); // keep local in sync with cloud
+      } else if(!local) {
+        // Brand new user with no data anywhere -- set defaults
+        setCats(INIT_CATEGORIES);
+        setOrder({ cat1:[], cat2:[] });
+        setMpd({ cat1:20, cat2:20 });
       }
       cloudLoaded.current = true;
       setSync("synced");
     }).catch(()=>{
-      cloudLoaded.current = true; // allow saves even if cloud load fails
+      if(!local) {
+        // Offline new user -- set defaults
+        setCats(INIT_CATEGORIES);
+        setOrder({ cat1:[], cat2:[] });
+        setMpd({ cat1:20, cat2:20 });
+      }
+      cloudLoaded.current = true;
       setSync("offline");
     });
   },[user]);
 
   const applyState=(s)=>{
-    if(s.books)      setBooks(s.books);
-    if(s.order)      setOrder(s.order);
-    if(s.minsPerDay) setMpd(s.minsPerDay);
-    if(s.log)        setLog(s.log);
-    if(s.categories) setCats(s.categories);
-    if(s.shelf)      setShelf(s.shelf);
-    if(s.readMode)   setReadMode(s.readMode);
-    if(s.seqOrder)   setSeqOrder(s.seqOrder);
+    // Only apply fields that are meaningfully present (not just truthy)
+    if(s.books !== undefined)      setBooks(s.books);
+    if(s.order !== undefined)      setOrder(s.order);
+    if(s.minsPerDay !== undefined) setMpd(s.minsPerDay);
+    if(s.log !== undefined)        setLog(s.log);
+    if(s.categories && Object.keys(s.categories).length > 0) setCats(s.categories);
+    if(s.shelf !== undefined)      setShelf(s.shelf);
+    if(s.readMode)                 setReadMode(s.readMode);
+    if(s.seqOrder !== undefined)   setSeqOrder(s.seqOrder);
   };
+
+  // Keep a ref to current uid so the save timer closure always uses the right uid
+  const uidRef = useRef(null);
+  useEffect(()=>{ uidRef.current = user ? user.uid : null; },[user]);
 
   // Auto-save -- only writes to cloud after initial cloud load completes
   useEffect(()=>{
-    if(!user) return;
+    const uid = uidRef.current;
+    if(!uid) return;
     const state={books,order,minsPerDay:mpd,log,categories:cats,shelf,readMode,seqOrder};
-    saveLocal(user.uid, state);
-    if(!cloudLoaded.current) return; // don't overwrite cloud before we've read it
+    saveLocal(uid, state);
+    if(!cloudLoaded.current) return;
     setSync("saving");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(()=>{ saveCloud(user.uid, state); setSync("synced"); }, 1500);
+    saveTimer.current = setTimeout(()=>{
+      const currentUid = uidRef.current;
+      if(currentUid) { saveCloud(currentUid, state); setSync("synced"); }
+    }, 1500);
     return ()=>clearTimeout(saveTimer.current);
-  },[books,order,mpd,log,cats,shelf,readMode,seqOrder]);
+  },[books,order,mpd,log,cats,shelf,readMode,seqOrder,user]);
 
   const showToast=(msg)=>{ setToast(msg||"✓ Saved"); setTimeout(()=>setToast(false),2500); };
 
-  // First-time setup: new users start blank 
-  useEffect(()=>{
-    if(!user||Object.keys(books).length>0) return;
-    if(!loadLocal(user.uid)){
-      // Brand new user -- start completely empty with default categories
-      setCats(INIT_CATEGORIES);
-      setOrder({ cat1:[], cat2:[] });
-      setMpd({ cat1:20, cat2:20 });
-      setBooks({});
-    }
-  },[user]);
+  // First-time setup is now handled inside the load effect above
 
   // When categories change, ensure order/mpd have entries for all cats 
   useEffect(()=>{
