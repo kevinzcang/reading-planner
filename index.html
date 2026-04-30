@@ -1486,6 +1486,15 @@ function App(){
               {readMode==="sequential"?"≡ Sequential":"⫶ Parallel"}
             </button>
             <button onClick={handleExport} style={{background:"transparent",border:"1px solid #3a7a5a",color:"#5aaa7a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬇ Export</button>
+            <button onClick={()=>{
+              const uid=uidRef.current;
+              if(!uid){alert("Not signed in");return;}
+              const state={books,order,minsPerDay:mpd,log,categories:cats,shelf,readMode,seqOrder};
+              console.log("[Sync] Force saving to cloud...");
+              saveCloud(uid,state);
+              showToast("Syncing to cloud...");
+              setTimeout(()=>showToast("✓ Force synced!"),2000);
+            }} style={{background:"transparent",border:"1px solid #5a4a7a",color:"#9a8aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}} title="Push local data to cloud now">⬆ Force sync</button>
             <button onClick={handleImport} style={{background:"transparent",border:"1px solid #3a4a7a",color:"#6a7aaa",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>⬆ Import</button>
             <button onClick={()=>window.auth.signOut()} style={{background:"transparent",border:"1px solid #4a2a2a",color:"#8a5a5a",borderRadius:"6px",padding:"5px 12px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>Sign out</button>
           </div>
