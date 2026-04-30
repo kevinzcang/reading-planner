@@ -431,16 +431,17 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
 
   return (
     <div
-      draggable
-      onDragStart={e=>{ e.dataTransfer.effectAllowed="move"; onDragStart(bookKey); }}
       onDragEnter={e=>{ e.preventDefault(); onDragEnter(bookKey); }}
       onDragOver={e=>e.preventDefault()}
       onDragEnd={onDragEnd}
-      style={{background:bg,border:`1px solid ${border}`,borderLeft:`3px solid ${isSelected?col:isDragOver?col:col+"88"}`,borderRadius:"8px",marginBottom:"6px",transition:"border-color 0.1s,background 0.1s",boxShadow:isSelected?`0 0 0 2px ${col}40`:isDragOver?`0 2px 8px ${col}30`:"none",opacity:isDragging?0.45:1,cursor:"grab"}}>
+      style={{background:bg,border:`1px solid ${border}`,borderLeft:`3px solid ${isSelected?col:isDragOver?col:col+"88"}`,borderRadius:"8px",marginBottom:"6px",transition:"border-color 0.1s,background 0.1s",boxShadow:isSelected?`0 0 0 2px ${col}40`:isDragOver?`0 2px 8px ${col}30`:"none",opacity:isDragging?0.45:1}}>
       <div style={{display:"flex",alignItems:"center",padding:"10px 12px",gap:"8px"}}>
-        <button onClick={()=>isSelected?onMoveHere(bookKey):onSelect(bookKey)}
+        <button
+          draggable
+          onDragStart={e=>{ e.dataTransfer.effectAllowed="move"; e.stopPropagation(); onDragStart(bookKey); }}
+          onClick={e=>{ e.stopPropagation(); isSelected?onMoveHere(bookKey):onSelect(bookKey); }}
           title={isSelected?"Move here":"Tap to reorder"}
-          style={{background:isSelected?col+"40":isMoveTarget?col+"18":"transparent",border:`1px solid ${isSelected?col+"80":"#2a2018"}`,color:isSelected?col:isMoveTarget?col+"99":"#3a3028",borderRadius:"5px",padding:"4px 6px",cursor:"grab",fontSize:"14px",flexShrink:0,lineHeight:1,transition:"all 0.15s"}}>
+          style={{background:isSelected?col+"40":isMoveTarget?col+"18":"transparent",border:`1px solid ${isSelected?col+"80":"#2a2018"}`,color:isSelected?col:isMoveTarget?col+"99":"#3a3028",borderRadius:"5px",padding:"4px 6px",cursor:"grab",fontSize:"14px",flexShrink:0,lineHeight:1,transition:"all 0.15s",touchAction:"none"}}>
           {isSelected?"↕":"⠿"}
         </button>
         <div style={{flex:1,minWidth:0}}>
@@ -458,17 +459,17 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
             <div style={{fontSize:"13px",color:col,fontFamily:"sans-serif",fontWeight:700}}>~{tl.days}d</div>
             <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>{fmtShort(tl.startDate)}→{fmtShort(tl.endDate)}</div>
           </div>}
-          <button onClick={()=>onToggleEdit(bookKey)} style={{background:showEdit?col+"30":"transparent",border:`1px solid ${showEdit?col:"#3a3020"}`,color:showEdit?col:"#5a5040",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>✎</button>
-          {onShelve&&<button onClick={()=>onShelve(bookKey,"finished")} title="Mark as finished" style={{background:"transparent",border:"1px solid #2a5a3a",color:"#5a9a6a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"12px"}}>✓</button>}
-          {onShelve&&<button onClick={()=>onShelve(bookKey,"dropped")} title="Mark as dropped" style={{background:"transparent",border:"1px solid #5a2a2a",color:"#9a5a5a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}}>✕</button>}
-          {!onShelve&&<button onClick={()=>onDelete(bookKey)} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}} title="Remove">✕</button>}
+          <button onClick={e=>{e.stopPropagation();onToggleEdit(bookKey);}} style={{background:showEdit?col+"30":"transparent",border:`1px solid ${showEdit?col:"#3a3020"}`,color:showEdit?col:"#5a5040",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>✎</button>
+          {onShelve&&<button onClick={e=>{e.stopPropagation();onShelve(bookKey,"finished");}} title="Mark as finished" style={{background:"transparent",border:"1px solid #2a5a3a",color:"#5a9a6a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"12px"}}>✓</button>}
+          {onShelve&&<button onClick={e=>{e.stopPropagation();onShelve(bookKey,"dropped");}} title="Mark as dropped" style={{background:"transparent",border:"1px solid #5a2a2a",color:"#9a5a5a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}}>✕</button>}
+          {!onShelve&&<button onClick={e=>{e.stopPropagation();onDelete(bookKey);}} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}} title="Remove">✕</button>}
         </div>
       </div>
 
-      {b.pages>0&&<div style={{height:"3px",background:"#1a1810",marginTop:"-2px"}}><div style={{height:"100%",width:`${100-pct}%`,background:col+"88",borderRadius:"0 0 0 8px",transition:"width 0.3s"}}/></div>}
+      {b.pages>0&&<div style={{height:"3px",background:"#1a1810",marginTop:"-2px"}}><div style={{height:"100%",width:`${100-pct}%`,background:col+"88",transition:"width 0.3s"}}/></div>}
 
       {showEdit&&(
-        <div style={{borderTop:`1px solid ${col}28`,background:"#0a0908"}}>
+        <div onMouseDown={e=>e.stopPropagation()} onTouchStart={e=>e.stopPropagation()} style={{borderTop:`1px solid ${col}28`,background:"#0a0908"}}>
           <div style={{display:"flex",borderBottom:`1px solid ${col}20`}}>
             {[["details","⚙ Details"],["notes",`📝 Notes${notes.length?` (${notes.length})`:""}`]].map(([id,label])=>(
               <button key={id} onClick={()=>setEditTab(id)} style={{background:editTab===id?"#111008":"transparent",border:"none",borderBottom:editTab===id?`2px solid ${col}`:"2px solid transparent",color:editTab===id?col:"#5a5038",padding:"8px 16px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif",marginBottom:"-1px"}}>{label}</button>
@@ -508,7 +509,11 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
               <div>
                 <label style={labelStyle}>Pages Read — <span style={{color:col}}>{lRead} of {b.pages}</span> ({100-pct}% done, {pLeft} left)</label>
                 <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
-                  <input type="range" min={0} max={b.pages} value={parseInt(lRead)||0} onChange={e=>{const v=e.target.value;setLRead(v);onUpdate(bookKey,"pagesRead",parseInt(v));}} style={{flex:1,accentColor:col,cursor:"pointer"}}/>
+                  <input type="range" min={0} max={b.pages} value={parseInt(lRead)||0}
+                    onChange={e=>{const v=e.target.value;setLRead(v);onUpdate(bookKey,"pagesRead",parseInt(v));}}
+                    onMouseDown={e=>e.stopPropagation()}
+                    onTouchStart={e=>e.stopPropagation()}
+                    style={{flex:1,accentColor:col,cursor:"pointer"}}/>
                   <NumInput value={lRead} min={0} max={b.pages} width="65px" onChange={e=>setLRead(e.target.value)} onBlur={()=>{if(!commit("pagesRead",lRead,0,b.pages))setLRead(String(b.pagesRead||0));}}/>
                 </div>
               </div>
