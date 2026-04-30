@@ -409,6 +409,17 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
     const v=parse(raw); if(!isNaN(v)&&v>=min&&(max===undefined||v<=max)){onUpdate(bookKey,field,v);return true;} return false;
   };
 
+  // Auto-prompt shelve modal when book reaches 100%
+  const prevPagesRead = useRef(b.pagesRead||0);
+  useEffect(()=>{
+    const prev = prevPagesRead.current;
+    prevPagesRead.current = b.pagesRead||0;
+    if(b.pages>0 && b.pagesRead>=b.pages && prev<b.pages && onShelve){
+      // Small delay so the progress bar animation plays first
+      setTimeout(()=>onShelve(bookKey,"finished"), 400);
+    }
+  },[b.pagesRead, b.pages]);
+
   const handleAddNote=()=>{
     const text=noteInput.trim(); if(!text)return;
     onUpdate(bookKey,"notes",[...notes,{id:genKey(),text:sanitizeStr(text,5000),page:b.pagesRead||0,date:new Date().toISOString()}]);
@@ -436,7 +447,7 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
           <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
             {idx===0&&<Pill color={col}>Next up</Pill>}
             {pLeft<b.pages&&pLeft>0&&<Pill color="#c9a84c">In progress</Pill>}
-            {pLeft===0&&<Pill color="#5a8a5a">✓ Done</Pill>}
+            {pLeft===0&&<span onClick={onShelve?()=>onShelve(bookKey,"finished"):undefined} style={{fontSize:"10px",background:"#1a3a2a",color:"#6a9a7a",border:"1px solid #2a5a3a",padding:"2px 7px",borderRadius:"10px",fontFamily:"sans-serif",letterSpacing:"0.5px",whiteSpace:"nowrap",flexShrink:0,cursor:onShelve?"pointer":"default"}} title={onShelve?"Click to move to shelf":undefined}>✓ Done</span>}
             <span style={{fontSize:"14px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>{b.title}</span>
             {b.series&&<span style={{fontSize:"11px",color:"#6a5a40",fontStyle:"italic"}}>{b.series}</span>}
           </div>
@@ -448,7 +459,9 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
             <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>{fmtShort(tl.startDate)}→{fmtShort(tl.endDate)}</div>
           </div>}
           <button onClick={()=>onToggleEdit(bookKey)} style={{background:showEdit?col+"30":"transparent",border:`1px solid ${showEdit?col:"#3a3020"}`,color:showEdit?col:"#5a5040",borderRadius:"5px",padding:"4px 8px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>✎</button>
-          <button onClick={()=>onDelete(bookKey)} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}} title="Remove">✕</button>
+          {onShelve&&<button onClick={()=>onShelve(bookKey,"finished")} title="Mark as finished" style={{background:"transparent",border:"1px solid #2a5a3a",color:"#5a9a6a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"12px"}}>✓</button>}
+          {onShelve&&<button onClick={()=>onShelve(bookKey,"dropped")} title="Mark as dropped" style={{background:"transparent",border:"1px solid #5a2a2a",color:"#9a5a5a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}}>✕</button>}
+          {!onShelve&&<button onClick={()=>onDelete(bookKey)} style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}} title="Remove">✕</button>}
         </div>
       </div>
 
@@ -582,8 +595,9 @@ function AddBookForm({onAdd,onClose,categories,defaultType}){
 
 // SLOT PANEL 
 function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReorder,onDelete,onAddNew,onUpdateMins,onShelve}){
-  const [shelveFor, setShelveFor] = useState(null);
-  const [selected,  setSelected]  = useState(null);
+  const [shelveFor,     setShelveFor]     = useState(null);
+  const [shelveStatus,  setShelveStatus]  = useState("finished");
+  const [selected,      setSelected]      = useState(null);
   const [editKey,   setEditKey]   = useState(null);
   const [showAdd,   setShowAdd]   = useState(false);
   const [dragKey,   setDragKey]   = useState(null);
@@ -892,8 +906,8 @@ function StarRating({value, onChange, size}){
 }
 
 // SHELVE MODAL -- shown when user marks a book finished/dropped
-function ShelveModal({book, bookKey, categories, onConfirm, onClose}){
-  const [status,setStatus]=useState("finished");
+function ShelveModal({book, bookKey, categories, onConfirm, onClose, initialStatus}){
+  const [status,setStatus]=useState(initialStatus||"finished");
   const [rating,setRating]=useState(0);
   const [review,setReview]=useState("");
   const cat=categories[book.type]||{color:"#8a8070",label:book.type};
