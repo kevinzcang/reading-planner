@@ -130,7 +130,21 @@ function buildTimeline(order, books, mpd) {
 function lsKey(uid){ return STORAGE_KEY+(uid?`_${uid}`:"_guest"); }
 function loadLocal(uid){ try{ const r=localStorage.getItem(lsKey(uid)); return r?JSON.parse(r):null; }catch(e){return null;} }
 function saveLocal(uid,state){ try{ localStorage.setItem(lsKey(uid),JSON.stringify(state)); }catch(e){} }
-function cloudDoc(uid){ return window.db.collection("users").doc(uid).collection("data").doc("schedule"); }
+function cloudDoc(uid){
+  if(!window.db) throw new Error("Firebase not initialized");
+  return window.db.collection("users").doc(uid).collection("data").doc("schedule");
+}
+
+function waitForDb(){ 
+  return new Promise((resolve, reject)=>{
+    if(window.db){ resolve(); return; }
+    let tries=0;
+    const t=setInterval(()=>{
+      if(window.db){ clearInterval(t); resolve(); }
+      else if(++tries>20){ clearInterval(t); reject(new Error("Firebase db never initialized")); }
+    }, 250);
+  });
+}
 
 // Rate limiter: max N calls per window (client-side courtesy limit) 
 function makeRateLimiter(maxCalls, windowMs){
@@ -229,18 +243,34 @@ function sanitizeState(state){
 }
 
 async function loadCloud(uid){
-  if(!canRead()){ console.warn("Read rate limit hit"); return null; }
+  if(!canRead()){ console.warn("[Sync] Read rate limit hit"); return null; }
+  console.log("[Sync] Loading from Firestore for uid:", uid);
   try{
+    await waitForDb();
     const s = await cloudDoc(uid).get();
-    return s.exists ? s.data() : null;
-  }catch(e){ console.warn("cloud load failed",e); return null; }
+    if(s.exists){
+      const data = s.data();
+      console.log("[Sync] Cloud data found, books:", Object.keys(data.books||{}).length);
+      return data;
+    } else {
+      console.log("[Sync] No cloud data found for this user");
+      return null;
+    }
+  }catch(e){ console.error("[Sync] Load FAILED:", e); return null; }
 }
 
 function saveCloud(uid, state){
-  if(!canWrite()){ console.warn("Write rate limit hit — slow down"); return; }
-  const clean = sanitizeState(JSON.parse(JSON.stringify(state)));
-  if(!isSafePayload(clean)){ console.warn("Payload too large, skipping cloud save"); return; }
-  cloudDoc(uid).set(clean).catch(e => console.warn("cloud save failed",e));
+  if(!canWrite()){ console.warn("[Sync] Write rate limit hit"); return; }
+  // Deep clone to strip non-serializable values, but don't run sanitizeState
+  // (sanitizeState/migrateState is for untrusted imports, not our own saves)
+  let clean;
+  try { clean = JSON.parse(JSON.stringify(state)); }
+  catch(e){ console.warn("[Sync] Failed to serialize state:", e); return; }
+  if(!isSafePayload(clean)){ console.warn("[Sync] Payload too large, skipping"); return; }
+  console.log("[Sync] Saving to Firestore for uid:", uid, "books:", Object.keys(clean.books||{}).length);
+  cloudDoc(uid).set(clean)
+    .then(()=> console.log("[Sync] Save successful"))
+    .catch(e => console.error("[Sync] Save FAILED:", e));
 }
 
 function blankState(cats){
@@ -1213,11 +1243,13 @@ function App(){
 
     // Load localStorage first for instant display
     const local = loadLocal(user.uid);
+    console.log("[Sync] Local data:", local ? Object.keys(local.books||{}).length+" books" : "none");
     if(local){ applyState(sanitizeState(local)); }
 
     // Then load cloud and overwrite (cloud is authoritative)
     loadCloud(user.uid).then(cloud=>{
       if(cloud && cloud.books && Object.keys(cloud.books).length > 0){
+        console.log("[Sync] Applying cloud data");
         applyState(sanitizeState(cloud));
         saveLocal(user.uid, cloud); // keep local in sync with cloud
       } else if(!local) {
@@ -1262,7 +1294,10 @@ function App(){
     if(!uid) return;
     const state={books,order,minsPerDay:mpd,log,categories:cats,shelf,readMode,seqOrder};
     saveLocal(uid, state);
-    if(!cloudLoaded.current) return;
+    if(!cloudLoaded.current){
+      console.log("[Sync] Skipping cloud save - cloud not loaded yet");
+      return;
+    }
     setSync("saving");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(()=>{
