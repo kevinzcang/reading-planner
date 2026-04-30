@@ -634,6 +634,12 @@ function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReo
 
   return (
     <div style={{background:"#111008",border:`1px solid ${col}35`,borderRadius:"12px",overflow:"hidden",marginBottom:"16px"}}>
+      {shelveFor&&books[shelveFor]&&(
+        <ShelveModal book={books[shelveFor]} bookKey={shelveFor} categories={categories}
+          initialStatus={shelveStatus}
+          onConfirm={(k,s,r,rv)=>{ onShelve(k,s,r,rv); setShelveFor(null); setShelveStatus("finished"); }}
+          onClose={()=>{ setShelveFor(null); setShelveStatus("finished"); }}/>
+      )}
       <div style={{background:`linear-gradient(90deg,${col}18 0%,transparent 60%)`,borderBottom:`1px solid ${col}28`,padding:"12px 16px",display:"flex",alignItems:"center",gap:"10px"}}>
         <span style={{fontSize:"20px"}}>{category.icon}</span>
         <div style={{flex:1}}>
@@ -664,7 +670,7 @@ function SlotPanel({catKey,category,order,books,tl,mpd,categories,onUpdate,onReo
         {order.map((key,i)=>{
           const t=tl.find(x=>x.key===key);
           return <BookRow key={key} bookKey={key} books={books} tl={t} mpd={mpd} categories={categories}
-            onUpdate={onUpdate} onDelete={onDelete} onShelve={onShelve?()=>setShelveFor(key):null}
+            onUpdate={onUpdate} onDelete={onDelete} onShelve={onShelve?(bk,status)=>{setShelveFor(bk);setShelveStatus(status||"finished");}:null}
             isSelected={selected===key} onSelect={handleSelect}
             isMoveTarget={!!selected&&selected!==key} onMoveHere={handleMoveHere}
             showEdit={editKey===key} onToggleEdit={k=>setEditKey(p=>p===k?null:k)}
