@@ -1112,6 +1112,8 @@ function ShelfView({books, shelf, categories, onUpdate, onUnshelf}){
 // SEQUENTIAL PANEL -- unified reading queue across all categories
 function SequentialPanel({cats,books,shelf,order,seqOrder,timelines,mpd,categories,onReorder,onAdd,onShelve,onUpdate,onDelete,onUpdateMins}){
   const [showShelveFor,setShowShelveFor]=useState(null);
+  const [shelveFor,    setShelveFor]    = useState(null);
+  const [shelveStatus, setShelveStatus] = useState("finished");
   const [dragKey,setDragKey]=useState(null);
   const [dragOver,setDragOver]=useState(null);
   const [selected,setSelected]=useState(null);
@@ -1148,10 +1150,14 @@ function SequentialPanel({cats,books,shelf,order,seqOrder,timelines,mpd,categori
 
   return (
     <div>
-      {showShelveFor&&books[showShelveFor]&&(
-        <ShelveModal book={books[showShelveFor]} bookKey={showShelveFor} categories={categories}
-          onConfirm={(k,s,r,rv)=>{ onShelve(k,s,r,rv); setShowShelveFor(null); }}
-          onClose={()=>setShowShelveFor(null)}/>
+      {(shelveFor||showShelveFor)&&books[shelveFor||showShelveFor]&&(
+        <ShelveModal
+          book={books[shelveFor||showShelveFor]}
+          bookKey={shelveFor||showShelveFor}
+          categories={categories}
+          initialStatus={shelveFor ? shelveStatus : "finished"}
+          onConfirm={(k,s,r,rv)=>{ onShelve(k,s,r,rv); setShelveFor(null); setShowShelveFor(null); setShelveStatus("finished"); }}
+          onClose={()=>{ setShelveFor(null); setShowShelveFor(null); setShelveStatus("finished"); }}/>
       )}
 
       {/* Reading queue */}
@@ -1183,36 +1189,17 @@ function SequentialPanel({cats,books,shelf,order,seqOrder,timelines,mpd,categori
             <div style={{textAlign:"center",padding:"20px",color:"#4a4030",fontFamily:"sans-serif",fontSize:"13px",fontStyle:"italic"}}>Queue is empty. Add books from below.</div>
           )}
           {inQueue.map((key,i)=>{
-            const b=books[key]; if(!b)return null;
-            const cat=categories[b.type]||{color:"#8a8070"};
-            const col=cat.color;
             const t=seqTl.find(x=>x.key===key);
-            const isDrag=dragKey===key,isOver=dragOver===key,isSel=selected===key,isTarget=!!selected&&selected!==key;
             return (
-              <div key={key}
-                draggable onDragStart={()=>setDragKey(key)} onDragEnter={e=>{e.preventDefault();if(key!==dragKey)setDragOver(key);}} onDragOver={e=>e.preventDefault()} onDragEnd={handleDragEnd}
-                style={{background:isSel?col+"28":isOver?col+"18":"#0d0c0a",border:`1px solid ${isSel?col+"cc":isOver?col+"70":col+"28"}`,borderLeft:`3px solid ${isSel?col:col+"88"}`,borderRadius:"7px",marginBottom:"5px",opacity:isDrag?0.4:1,transition:"all 0.12s",cursor:"grab"}}>
-                <div style={{display:"flex",alignItems:"center",padding:"9px 12px",gap:"8px"}}>
-                  <span style={{fontSize:"12px",color:"#3a3028",fontFamily:"sans-serif",minWidth:"20px",flexShrink:0}}>{i+1}.</span>
-                  <button onClick={()=>isSel?handleMoveHere(key):handleSelect(key)} style={{background:isSel?col+"40":isTarget?col+"18":"transparent",border:`1px solid ${isSel?col+"80":"#2a2018"}`,color:isSel?col:isTarget?col+"99":"#3a3028",borderRadius:"5px",padding:"4px 6px",cursor:"grab",fontSize:"14px",flexShrink:0,lineHeight:1}}>{isSel?"↕":"⠿"}</button>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
-                      {i===0&&<Pill color="#5a8a5a">Up next</Pill>}
-                      <span style={{fontSize:"14px",color:"#f0e4cc",fontFamily:"Georgia,serif"}}>{b.title}</span>
-                      <Pill color={col}>{cat.label}</Pill>
-                    </div>
-                    <div style={{fontSize:"11px",color:"#6a5840"}}>{b.author}</div>
-                  </div>
-                  <div style={{display:"flex",alignItems:"center",gap:"6px",flexShrink:0}}>
-                    {t&&<div style={{textAlign:"right"}}>
-                      <div style={{fontSize:"12px",color:"#7a9a7a",fontFamily:"sans-serif",fontWeight:700}}>~{t.days}d</div>
-                      <div style={{fontSize:"10px",color:"#4a4030",fontFamily:"sans-serif",whiteSpace:"nowrap"}}>{fmtShort(t.startDate)}→{fmtShort(t.endDate)}</div>
-                    </div>}
-                    <button onClick={()=>setShowShelveFor(key)} title="Mark finished/dropped" style={{background:"transparent",border:"1px solid #3a4a3a",color:"#5a7a5a",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"12px"}}>✓</button>
-                    <button onClick={()=>{ const a=inQueue.filter(k=>k!==key); onReorder(a); }} title="Remove from queue" style={{background:"transparent",border:"1px solid #3a1a10",color:"#6a3020",borderRadius:"5px",padding:"4px 7px",cursor:"pointer",fontSize:"11px"}}>✕</button>
-                  </div>
-                </div>
-              </div>
+              <BookRow key={key} bookKey={key} books={books} tl={t} mpd={avgMpd} categories={categories}
+                onUpdate={onUpdate} onDelete={()=>{ const a=inQueue.filter(k=>k!==key); onReorder(a); }}
+                onShelve={(bk,status)=>{ setShelveFor(bk); setShelveStatus(status||"finished"); }}
+                isSelected={selected===key} onSelect={handleSelect}
+                isMoveTarget={!!selected&&selected!==key} onMoveHere={handleMoveHere}
+                showEdit={editKey===key} onToggleEdit={k=>setEditKey(p=>p===k?null:k)}
+                onDragStart={k=>setDragKey(k)} onDragEnter={k=>{if(k!==dragKey)setDragOver(k);}} onDragEnd={handleDragEnd}
+                isDragging={dragKey===key} isDragOver={dragOver===key}
+                idx={i}/>
             );
           })}
         </div>
