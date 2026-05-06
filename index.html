@@ -115,14 +115,16 @@ function fmtDateStr(s){ if(!s)return""; const d=new Date(s+"T12:00:00"); return 
 function todayStr(){ return new Date().toISOString().split("T")[0]; }
 function genKey(){ return "k"+Math.random().toString(36).slice(2,9); }
 
-function buildTimeline(order, books, mpd) {
+function buildTimeline(order, books, mpd, perBookMpd) {
+  // perBookMpd: optional {bookKey: mpdOverride} map for sequential mode
   let cursor = new Date(START_DATE);
   return (order||[]).map(key=>{
     const b=books[key]; if(!b) return null;
-    const days=calcDaysForBook(b,mpd);
+    const effectiveMpd = (perBookMpd && perBookMpd[key]) ? perBookMpd[key] : mpd;
+    const days=calcDaysForBook(b, effectiveMpd);
     const start=new Date(cursor), end=addDays(cursor,days-1);
     cursor=addDays(cursor,days);
-    return {key,days,startDate:start,endDate:end};
+    return {key,days,startDate:start,endDate:end,mpd:effectiveMpd};
   }).filter(Boolean);
 }
 
@@ -206,6 +208,7 @@ function sanitizeBook(b){
     pages:     Math.min(Math.max(0, parseInt(b.pages)||0), 99999),
     wordCount: Math.min(Math.max(0, parseInt(b.wordCount)||0), 9999999),
     wpm:       b.wpm ? Math.min(Math.max(10, parseInt(b.wpm)||0), 2000) : 0, // 0 = not set, use default
+    seqMpd:    b.seqMpd ? Math.min(Math.max(1, parseInt(b.seqMpd)||0), 480) : 0,
     pagesRead: Math.min(Math.max(0, parseInt(b.pagesRead)||0), 99999),
     type:      sanitizeStr(b.type || "", 100),
   };
@@ -411,7 +414,7 @@ function CategoryManager({categories, catOrder, onUpdate, onClose}){
 }
 
 // BOOK ROW 
-function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isSelected,onSelect,isMoveTarget,onMoveHere,showEdit,onToggleEdit,idx,onDragStart,onDragEnter,onDragEnd,isDragging,isDragOver}){
+function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isSelected,onSelect,isMoveTarget,onMoveHere,showEdit,onToggleEdit,idx,onDragStart,onDragEnter,onDragEnd,isDragging,isDragOver,showSeqMpd}){
   const b=books[bookKey]; if(!b) return null;
   const cat=categories[b.type]||{color:"#8a8070",label:b.type,icon:"📖"};
   const col=cat.color;
@@ -433,6 +436,7 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
   useEffect(()=>{ setLWords(String(b.wordCount||"")); },[b.wordCount]);
   useEffect(()=>{ setLWpm(String(b.wpm)); },[b.wpm]);
   useEffect(()=>{ setLRead(String(b.pagesRead||0)); },[b.pagesRead]);
+  useEffect(()=>{ setLSeqMpd(String(b.seqMpd||"")); },[b.seqMpd]);
 
   const commit=(field,raw,min,max,parse=parseInt)=>{
     const v=parse(raw); if(!isNaN(v)&&v>=min&&(max===undefined||v<=max)){onUpdate(bookKey,field,v);return true;} return false;
@@ -546,6 +550,24 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
                   <NumInput value={lRead} min={0} max={b.pages} width="65px" onChange={e=>setLRead(e.target.value)} onBlur={()=>{if(!commit("pagesRead",lRead,0,b.pages))setLRead(String(b.pagesRead||0));}}/>
                 </div>
               </div>
+              {showSeqMpd && (
+                <div style={{marginTop:"4px"}}>
+                  <label style={labelStyle}>
+                    Reading time for this book
+                    <span style={{color:"#4a4030",textTransform:"none",letterSpacing:0}}>{b.seqMpd?" (custom)": " (using global default)"}</span>
+                  </label>
+                  <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
+                    <button onClick={e=>{e.stopPropagation(); const v=Math.max(1,(parseInt(lSeqMpd)||mpd)-5); setLSeqMpd(String(v)); onUpdate(bookKey,"seqMpd",v);}} style={{background:"transparent",border:`1px solid ${col}40`,color:col,borderRadius:"4px",width:"24px",height:"24px",cursor:"pointer",fontSize:"14px",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+                    <NumInput value={lSeqMpd} min={1} max={480} width="60px"
+                      placeholder={String(mpd)}
+                      onChange={e=>setLSeqMpd(e.target.value)}
+                      onBlur={()=>{ const v=parseInt(lSeqMpd); if(!lSeqMpd||lSeqMpd==="0"){ onUpdate(bookKey,"seqMpd",0); setLSeqMpd(""); } else if(v>=1&&v<=480){ onUpdate(bookKey,"seqMpd",v); } else setLSeqMpd(String(b.seqMpd||"")); }}/>
+                    <button onClick={e=>{e.stopPropagation(); const v=Math.min(480,(parseInt(lSeqMpd)||mpd)+5); setLSeqMpd(String(v)); onUpdate(bookKey,"seqMpd",v);}} style={{background:"transparent",border:`1px solid ${col}40`,color:col,borderRadius:"4px",width:"24px",height:"24px",cursor:"pointer",fontSize:"14px",display:"flex",alignItems:"center",justifyContent:"center"}}>+</button>
+                    <span style={{fontSize:"12px",color:"#5a5038",fontFamily:"sans-serif"}}>min/day</span>
+                    {b.seqMpd>0 && <button onClick={()=>{onUpdate(bookKey,"seqMpd",0);setLSeqMpd("");}} style={{background:"transparent",border:"1px solid #3a2a18",color:"#6a5038",borderRadius:"5px",padding:"3px 7px",cursor:"pointer",fontSize:"11px",fontFamily:"sans-serif"}}>Reset to default</button>}
+                  </div>
+                </div>
+              )}
               <div style={{fontSize:"11px",color:"#5a5038",fontFamily:"sans-serif",paddingTop:"4px",borderTop:"1px solid #1e1c14"}}>
                 Est. {Math.round(pLeft*wordsPerPage(b)/effectiveWpm(b))} min · {Math.round(pLeft*wordsPerPage(b)/effectiveWpm(b)/60*10)/10}h remaining {!b.wpm&&<span style={{color:"#5a4a30"}}>(default speed)</span>}
               </div>
@@ -1199,6 +1221,7 @@ function SequentialPanel({cats,books,shelf,order,seqOrder,timelines,mpd,categori
                 showEdit={editKey===key} onToggleEdit={k=>setEditKey(p=>p===k?null:k)}
                 onDragStart={k=>setDragKey(k)} onDragEnter={k=>{if(k!==dragKey)setDragOver(k);}} onDragEnd={handleDragEnd}
                 isDragging={dragKey===key} isDragOver={dragOver===key}
+                showSeqMpd={true}
                 idx={i}/>
             );
           })}
@@ -1462,7 +1485,10 @@ function App(){
   if(readMode==="sequential") {
     // One unified timeline - each book uses its own wpm but shares a single slot
     const avgMpd = Object.values(mpd).length ? Math.round(Object.values(mpd).reduce((s,v)=>s+v,0)/Object.values(mpd).length) : 20;
-    const seqTimeline = buildTimeline(seqOrder.filter(k=>activeBooks.includes(k)), books, avgMpd);
+    // Build per-book mpd overrides for sequential mode
+    const perBookMpd = {};
+    seqOrder.forEach(k=>{ if(books[k] && books[k].seqMpd) perBookMpd[k] = books[k].seqMpd; });
+    const seqTimeline = buildTimeline(seqOrder.filter(k=>activeBooks.includes(k)), books, avgMpd, perBookMpd);
     // Put results under each cat key so existing views still work
     Object.keys(cats).forEach(k=>{ timelines[k]=[]; });
     seqTimeline.forEach(t=>{ const b=books[t.key]; if(b) timelines[b.type]=[...(timelines[b.type]||[]),t]; });
