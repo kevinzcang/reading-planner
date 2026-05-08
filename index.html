@@ -428,7 +428,8 @@ function BookRow({bookKey,books,tl,mpd,categories,onUpdate,onDelete,onShelve,isS
   const [lRead,   setLRead]   = useState(String(b.pagesRead||0));
   const [lTitle,  setLTitle]  = useState(b.title);
   const [lAuthor, setLAuthor] = useState(b.author);
-  const [lSeries, setLSeries] = useState(b.series||"");
+  const [lSeries,  setLSeries]  = useState(b.series||"");
+  const [lSeqMpd,  setLSeqMpd]  = useState(String(b.seqMpd||""));
   const [editTab, setEditTab] = useState("details");
   const [noteInput,setNoteInput]=useState("");
 
